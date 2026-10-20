@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Cross-region getting started 1: replication and recovery estimates · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="cross-region-getting-started-1-replication-and-recovery-estimates">Cross-region getting started 1: replication and recovery estimates</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> this tutorial defines the operator experience
+we will implement next. The current <code>CrossRegionReplication</code> object performs
+bounded checkpoint transfer; it does not yet provide the continuous-WAL,
+recovery-preview, or promotion behavior shown here.</p>
+</blockquote>
+<p>This is the first of three progressively deeper tutorials:</p>
+<ol>
+<li>Replicate a volume and inspect estimated RPO and RTO in a three-region lab.</li>
+<li><a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_FAILOVER_ON_KUBERNETES.html">Exercise automatic failover and failback while preserving performance
+guarantees</a>.</li>
+<li><a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_POLICY_ON_KUBERNETES.html">Schedule several recovery classes and optionally require an HTTPS approval
+before switching ownership</a>.</li>
+</ol>
+<p>Two follow-on peer-federation tutorials cover <a href="../docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_HOSTING_ON_KUBERNETES.html">offering bounded ciphertext
+custody to an untrusted friend</a>
+and <a href="../docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_STORAGE_ON_KUBERNETES.html">placing your own encrypted files in that friend's
+region</a>.
+A sibling guide shows how that friend can <a href="../docs/GETTING_STARTED_WITH_A_MACOS_FEDERATED_REGION.html">operate the receiving region on a
+Mac without Kubernetes</a>.</p>
+<p>This first exercise represents regions <code>a</code>, <code>b</code>, and <code>c</code> with three isolated
+zccusan installations in one Kubernetes cluster. It is inexpensive and easy to
+inspect, but it does not create independent regional power, network,
+administrative, or Kubernetes failure domains.</p>
+<p>You may reuse the cluster and nodes from <a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">getting started with zccusan on
+Kubernetes</a>. Leave that CSI
+installation in place; this tutorial uses separate namespaces and CSI
+identities.</p>
+<h2 id="what-you-will-build">What you will build</h2>
+<pre><code class="language-text">region A: writable regional volume
+  ├─ continuous encrypted WAL → region B: durable replica + read point
+  └─ continuous encrypted WAL → region C: read-through cache
+                                      (not a durability copy)
+</code></pre>
+<p>B retains a complete checkpoint and hole-free WAL suffix. C can serve recent
+cached extents and fetch misses from an authoritative read view, but its
+contents remain evictable. C therefore contributes nothing to durability even
+if it happens to have cached every byte.</p>
+<p>At the end you will preview node loss, loss of A, loss of A and B together, and
+loss of A while B is lagging. Estimates come from observed high-water marks,
+reserved lanes, replay rate, materialization time, and attachment time; they
+are not static labels.</p>
+<h2 id="1-create-three-simulated-regions">1. Create three simulated regions</h2>
+<p>Set <code>ZCCUSAN_VERSION</code> to the release that declares support for this target-state
+tutorial. Unique driver names and host paths let the installations share one
+API server and the same nodes.</p>
+<pre><code class="language-bash">kubectl create namespace zccusan-region-a
+kubectl create namespace zccusan-region-b
+kubectl create namespace zccusan-region-c
+
+helm repo add zcutils https://robjcaskey.github.io/zcutils
+helm repo update zcutils
+</code></pre>
+<p>Install A:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan-region-a zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --namespace zccusan-region-a \
+  --set fullnameOverride=zccusan-region-a \
+  --set driverName=io.zcutils.zcblock.region-a \
+  --set stateDir=/var/lib/zccusan-region-a \
+  --set region.id=region-a \
+  --set federation.simulatedFailureDomain=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install B:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan-region-b zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --namespace zccusan-region-b \
+  --set fullnameOverride=zccusan-region-b \
+  --set driverName=io.zcutils.zcblock.region-b \
+  --set stateDir=/var/lib/zccusan-region-b \
+  --set region.id=region-b \
+  --set federation.simulatedFailureDomain=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install C:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan-region-c zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --namespace zccusan-region-c \
+  --set fullnameOverride=zccusan-region-c \
+  --set driverName=io.zcutils.zcblock.region-c \
+  --set stateDir=/var/lib/zccusan-region-c \
+  --set region.id=region-c \
+  --set federation.simulatedFailureDomain=true \
+  --wait --timeout 120s
+</code></pre>
+<p>The simulation marker remains visible in status and prevents this laboratory
+from being reported as real regional compliance.</p>
+<pre><code class="language-bash">kubectl get csidriver \
+  io.zcutils.zcblock.region-a \
+  io.zcutils.zcblock.region-b \
+  io.zcutils.zcblock.region-c
+kubectl get pods -A -l app.kubernetes.io/name=zcblock-csi -o wide
+</code></pre>
+<h2 id="2-link-the-simulated-regions">2. Link the simulated regions</h2>
+<p>Create the federation, then add each directional relationship explicitly. The
+next tutorial replaces this local shortcut with independently authenticated
+cluster invitations.</p>
+<pre><code class="language-bash">zcctl federation create tutorial-global \
+  --region region-a --namespace zccusan-region-a
+zcctl federation link tutorial-global \
+  --from region-a --to region-b --namespace zccusan-region-b
+zcctl federation link tutorial-global \
+  --from region-b --to region-a --namespace zccusan-region-a
+zcctl federation link tutorial-global \
+  --from region-a --to region-c --namespace zccusan-region-c
+zcctl federation link tutorial-global \
+  --from region-c --to region-a --namespace zccusan-region-a
+zcctl federation link tutorial-global \
+  --from region-b --to region-c --namespace zccusan-region-c
+zcctl federation link tutorial-global \
+  --from region-c --to region-b --namespace zccusan-region-b
+zcctl federation status tutorial-global --watch
+</code></pre>
+<p>Every link treats its network segment as untrusted. User payloads use native
+authenticated encryption by default. TLS is an optional outer compliance
+layer, but it is not enabled for published performance figures.</p>
+<h2 id="3-declare-global-volume-behavior">3. Declare global volume behavior</h2>
+<p>Create <code>cross-region-volume.yaml</code>. The tutorial profiles make A writable, B a
+retained durable destination, and C an evictable read-through destination.</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: cross-region-getting-started
+  namespace: zccusan-region-a
+spec:
+  federationRef: tutorial-global
+  volumeSelector:
+    matchNames: [zc-mirror]
+  preferredWriteRegion: region-a
+  placements:
+    - region: region-a
+      profileRef: tutorial-regional
+      custody: Durable
+      access: ReadWrite
+    - region: region-b
+      profileRef: tutorial-durable-replica
+      custody: Durable
+      access: ReadThrough
+      replication:
+        mode: ContinuousWal
+        targetLag: 5s
+        maximumLag: 30s
+    - region: region-c
+      profileRef: tutorial-read-cache
+      custody: CacheOnly
+      access: ReadThrough
+      replication:
+        mode: ContinuousWal
+        targetLag: 1s
+        maximumLag: 10s
+  recoveryObjectives:
+    - failureSet: [RegionNode]
+      rpo: 0s
+      rto: 10s
+    - failureSet: [region-a]
+      rpo: 5s
+      rto: 2m
+    - failureSet: [region-a, region-b]
+      action: HoldDurably
+</code></pre>
+<p>Apply it once through A. The adapter commits it to the global state log; do not
+create competing copies independently in all three regions.</p>
+<pre><code class="language-bash">kubectl apply -f cross-region-volume.yaml
+kubectl -n zccusan-region-a get globalvolumepolicy \
+  cross-region-getting-started --watch
+</code></pre>
+<p>The policy becomes <code>Ready</code> only after B has a complete checkpoint plus a
+hole-free live WAL suffix and C has joined the live feed. A snapshot may seed a
+destination, but routine replication remains an attached WAL stream.</p>
+<h2 id="4-exercise-the-global-read-points">4. Exercise the global read points</h2>
+<pre><code class="language-bash">zcctl volume write zc-mirror --region region-a --text tutorial-record
+zcctl volume read zc-mirror --region region-b --consistency read-your-writes
+zcctl volume read zc-mirror --region region-c --consistency read-your-writes
+zcctl volume read zc-mirror --region region-c --consistency read-your-writes
+zcctl volume status zc-mirror --show-regions --show-high-water-marks
+</code></pre>
+<p>B can satisfy the read from its durable projection. C's first read may fetch a
+missing extent; the second should be a local hit. Both carry a minimum HWM, so
+the cache never mistakes an old extent for a current value. B publishes a
+durable HWM; C publishes coverage, a closed/readable HWM, and
+<code>durabilityContribution: false</code>.</p>
+<h2 id="5-preview-recovery-without-causing-a-failure">5. Preview recovery without causing a failure</h2>
+<pre><code class="language-bash">zcctl recovery preview zc-mirror --unavailable region-a
+zcctl recovery preview zc-mirror --unavailable region-a,region-b
+zcctl recovery preview zc-mirror \
+  --unavailable region-a --assume-lag region-b=20s
+</code></pre>
+<p>Every report includes:</p>
+<ul>
+<li>the newest qualifying durable cut and estimated data-loss window;</li>
+<li>target selection or an explicit <code>HoldDurably</code> result;</li>
+<li>provisioning, queue, replay, materialization, and attachment time;</li>
+<li>estimated RPO and RTO with the observations used to calculate them;</li>
+<li>whether each declared objective is met; and</li>
+<li>missing durability, trust, key, capacity, or performance prerequisites.</li>
+</ul>
+<p>The A+B-loss preview must not count C as durable. Promotion requires complete
+durable coverage, a hole-free WAL suffix, independent retention, and a
+committed topology epoch; it is never a label-only change.</p>
+<h2 id="keep-the-lab-or-clean-it-up">Keep the lab or clean it up</h2>
+<p>Keep the installations to run tutorial two in simulation mode. Otherwise:</p>
+<pre><code class="language-bash">zcctl federation delete tutorial-global --wait
+helm uninstall zccusan-region-c --namespace zccusan-region-c
+helm uninstall zccusan-region-b --namespace zccusan-region-b
+helm uninstall zccusan-region-a --namespace zccusan-region-a
+kubectl delete namespace \
+  zccusan-region-c zccusan-region-b zccusan-region-a
+</code></pre>
+<p>Continue with <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_FAILOVER_ON_KUBERNETES.html">automatic cross-region failover and
+failback</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#what-you-will-build">What you will build</a><a href="#1-create-three-simulated-regions">1. Create three simulated regions</a><a href="#2-link-the-simulated-regions">2. Link the simulated regions</a><a href="#3-declare-global-volume-behavior">3. Declare global volume behavior</a><a href="#4-exercise-the-global-read-points">4. Exercise the global read points</a><a href="#5-preview-recovery-without-causing-a-failure">5. Preview recovery without causing a failure</a><a href="#keep-the-lab-or-clean-it-up">Keep the lab or clean it up</a></nav></div></body></html>

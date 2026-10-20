@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Untrusted federation 2: store 100 MB of files in another region · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="untrusted-federation-2-store-100-mb-of-files-in-another-region">Untrusted federation 2: store 100 MB of files in another region</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> the encrypted file-set resource and commands
+shown here define the intended user experience; they are not implemented
+end-to-end in the current chart.</p>
+</blockquote>
+<p>This is the consumer side of <a href="../docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_HOSTING_ON_KUBERNETES.html">offering bounded storage to an untrusted
+friend</a>.
+You will continuously protect up to 100 MB of local files in another region
+without giving that region a data-encryption key.</p>
+<p>File names, directory structure, attributes, and contents are encrypted before
+leaving your region. The remote region sees an opaque volume identity, sealed
+WAL segments, sizes, timing, and the minimum metadata required for quota and
+protocol enforcement.</p>
+<h2 id="1-check-the-remote-grant">1. Check the remote grant</h2>
+<p>Your friend's region must issue a <code>FederatedCapacityGrant</code> naming your
+authenticated region. Membership alone grants no capacity.</p>
+<pre><code class="language-bash">zcctl federation peer status buddy-region
+zcctl federation grant accepted --from buddy-region --show-effective-limits
+zcctl federation route status buddy-region
+</code></pre>
+<p>When both peers are behind NAT, the route should show two outbound relay legs
+and end-to-end native payload encryption. The relay never receives your volume
+key.</p>
+<h2 id="2-define-the-encrypted-remote-file-set">2. Define the encrypted remote file set</h2>
+<p>Create <code>remote-files.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: FederatedFileSet
+metadata:
+  name: buddy-copy
+  namespace: zccusan
+spec:
+  federationRef: friends-storage
+  source:
+    persistentVolumeClaimRef:
+      name: files-for-buddy-copy
+      namespace: zccusan
+    pathWithinVolume: /
+    maximumLogicalBytes: 100M
+  destination:
+    region: buddy-region
+    grantRef: buddy-inbound
+  protection:
+    mode: ContinuousWal
+    initialCheckpoint: Automatic
+    targetLag: 5m
+    maximumLag: 30m
+  encryption:
+    metadata: Encrypted
+    contents: Encrypted
+    keyAuthority: SourceRegionOnly
+    keyEscrow: Denied
+  retention:
+    minimum: 7d
+    immutableCheckpoints: 2
+</code></pre>
+<p>Create or reuse a 100 MB PVC named <code>files-for-buddy-copy</code>, populate it through
+your normal Pod workflow, then apply the object. The adapter follows the
+volume's ordered WAL; it does not depend on periodic directory scans or expose
+the Pod's path to another cluster.</p>
+<pre><code class="language-bash">kubectl apply -f remote-files.yaml
+zcctl fileset watch buddy-copy --show-high-water-marks
+</code></pre>
+<p>The initial checkpoint seeds the destination and the file-change WAL remains
+attached afterward. Routine updates do not repeatedly copy a complete
+100 MB image.</p>
+<p>At 16 KiB/s, transferring 100,000,000 payload bytes has a physical lower bound
+of about 102 minutes before encryption and framing overhead. The remote
+100-IOPS limit is not the bottleneck for ordinary 4 KiB writes at that byte
+rate. Status must use the effective lower ceiling when estimating RPO, initial
+seed time, and recovery.</p>
+<p>If the source exceeds 100 MB, local admission stops before transmitting the
+new extent and reports <code>QuotaExceeded</code>. It does not rely on the remote peer to
+discard arbitrary older data.</p>
+<h2 id="3-observe-cooperative-rate-limiting">3. Observe cooperative rate limiting</h2>
+<pre><code class="language-bash">zcctl fileset status buddy-copy \
+  --show-rate-contract --show-estimated-completion
+</code></pre>
+<p>Your sender shapes against the receiver's generation-bound byte and operation
+credits. A reconnect resumes the same contract; it does not create a fresh
+burst allowance.</p>
+<p>If a broken or modified sender violates the credit window, the remote closes
+the circuit and returns a signed retry time. Reconnecting early escalates the
+identity-bound backoff. The sender records the reason, waits locally, and never
+spins in a reconnect loop.</p>
+<p>Changing a contract creates a new committed generation. Existing connections
+must acknowledge that generation before using its limits; neither side may
+select whichever generation is more favorable.</p>
+<h2 id="4-prove-that-the-remote-copy-is-usable">4. Prove that the remote copy is usable</h2>
+<p>First inspect custody without retrieving data:</p>
+<pre><code class="language-bash">zcctl fileset status buddy-copy \
+  --show-remote-durable-hwm --show-retention
+</code></pre>
+<p>Then restore into an empty local PVC:</p>
+<pre><code class="language-bash">zcctl fileset restore buddy-copy \
+  --at latest-remote-durable \
+  --destination-pvc zccusan/buddy-copy-restore
+zcctl fileset verify buddy-copy \
+  --source-pvc zccusan/files-for-buddy-copy \
+  --restored-pvc zccusan/buddy-copy-restore
+</code></pre>
+<p>The remote returns ciphertext. Your local client authenticates and decrypts
+the file metadata and contents, then verifies the checkpoint manifest and
+hole-free WAL suffix. A successful remote durability receipt says the
+ciphertext is retained under the grant; it does not claim that your friend can
+read it.</p>
+<p>This remote copy is a recovery source, not automatically a global plaintext
+read point. To serve reads in the remote region, attach an authorized
+client-side decrypting endpoint or explicitly grant key access to a trusted
+execution boundary there.</p>
+<h2 id="5-stop-updates-or-remove-the-copy">5. Stop updates or remove the copy</h2>
+<p>Pausing leaves the last remote durable cut retained:</p>
+<pre><code class="language-bash">zcctl fileset pause buddy-copy
+zcctl fileset status buddy-copy --show-retention
+</code></pre>
+<p>Deletion is a two-party custody transition. The remote must acknowledge the
+authorized deletion and advance its tombstone generation before local status
+reports the copy absent:</p>
+<pre><code class="language-bash">kubectl delete -f remote-files.yaml
+zcctl fileset tombstone buddy-copy --watch
+</code></pre>
+<p>If the peer is unreachable, local state remains <code>DeletionPending</code> rather than
+claiming that the remote ciphertext disappeared.</p>
+<p>The receiving region does not need Kubernetes. Continue with <a href="../docs/GETTING_STARTED_WITH_A_MACOS_FEDERATED_REGION.html">the standalone
+macOS peer tutorial</a> when the
+remote operator wants to run only a local userspace daemon.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-check-the-remote-grant">1. Check the remote grant</a><a href="#2-define-the-encrypted-remote-file-set">2. Define the encrypted remote file set</a><a href="#3-observe-cooperative-rate-limiting">3. Observe cooperative rate limiting</a><a href="#4-prove-that-the-remote-copy-is-usable">4. Prove that the remote copy is usable</a><a href="#5-stop-updates-or-remove-the-copy">5. Stop updates or remove the copy</a></nav></div></body></html>

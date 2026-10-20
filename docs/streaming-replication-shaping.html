@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Streaming Replication and Shaping · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="streaming-replication-and-shaping">Streaming Replication and Shaping</h1>
+<p>This is part of zccusan: the Zero Copy Cinematic Universe Storage Area Network.
+The chain is descriptor primitives -&gt; zero-copy streams -&gt; zero-copy WALs,
+including WALs of WALs -&gt; <code>zcvolume</code> -&gt; <code>zcsan</code> -&gt; convenience <code>zccsi</code>. CSI is
+one adapter into zccusan. Replication streams, topology, token buckets, snapshot
+transfer, WAL catch-up, and future tenant policy belong to the zccusan
+control/data plane rather than to the Kubernetes CSI process.</p>
+<p>This repo already has the transport pieces for encrypted byte-stream
+replication:</p>
+<ul>
+<li><code>zc-tcpmux-send</code> and <code>zc-tcpmux-receive</code>: direct token-authenticated TCP mux
+transfer, encrypted with AES-256-GCM by default.</li>
+<li><code>zc-tcpmux-xfer</code>: SSH-coordinated remote receive plus encrypted TCP data
+plane.</li>
+<li><code>zcencrypt</code> and <code>zcdecrypt</code>: generic AES-256-GCM stream filters.</li>
+<li><code>zcforward</code>: fused receive/fanout/forward primitive. It can forward an
+already-encrypted stream without decrypting at the intermediate node.</li>
+<li><code>zctee</code> and <code>zcmaptee</code>: byte-compatible tee/fanout placeholders for the
+descriptor-native fanout model.</li>
+<li><code>zcsnap</code>: byte-compatible snapshot/WAL cut manifest emitter.</li>
+<li><code>tcp-wal-mux-server</code> and the WAL extent docs: current approximation of
+coalesced WAL extents and topological lane placement.</li>
+</ul>
+<p>The missing production component is not encryption or TCP transport. It is a
+replication gateway that owns admission, scheduling, accounting, and durability
+feedback across many tenants and many destination disks.</p>
+<h2 id="controller-integration">Controller Integration</h2>
+<p><code>zcblock-control</code> is the first local zccusan agent. The CSI process uses it as a
+client for snapshot create/delete, and <code>zcrepl csi-*</code> can use it with
+<code>--control-url http://127.0.0.1:9788</code>. The same API has stream-start endpoints
+for encrypted replication today; a later WebSocket transport can attach to the
+same protocol shape without changing CSI orchestration.</p>
+<p>The legacy Unix socket remains available for compatibility and accepts:</p>
+<ul>
+<li><code>REPL_RECV volume=&lt;id&gt; listen=&lt;addr&gt; port=&lt;port-or-0&gt; token=auto</code></li>
+<li><code>REPL_SEND snapshot=&lt;id&gt;|volume=&lt;id&gt; peer=&lt;ip&gt; port=&lt;port&gt; token=&lt;token&gt;</code></li>
+<li><code>REPL_STATUS [repl_id=&lt;id&gt;]</code></li>
+</ul>
+<p>The controller opens the source snapshot/image or destination volume directly
+and calls the Rust tcpmux/AES stream functions. It does not spawn
+<code>zc-tcpmux-send</code>, <code>zc-tcpmux-receive</code>, <code>zcencrypt</code>, or shell pipelines for the
+data path. <code>zccusan/deploy/zcblock-csi/test-local-regions-stream-repl.sh</code> exercises this
+with three local region controllers in one Kubernetes cluster.</p>
+<p><code>zcrepl</code> exposes the same surfaces as a zc-style command:</p>
+<pre><code class="language-bash">zcrepl token
+zcrepl recv --output /dev/target --listen 0.0.0.0 --port 42000 --generate-token
+zcrepl send --input /dev/source --peer target-node --port 42000 --token "$TOKEN"
+zcrepl csi-recv --control-url http://127.0.0.1:9788 --volume "$VOL" --token auto
+zcrepl csi-send --control-url http://127.0.0.1:9788 --snapshot "$SNAP" --peer "$IP" --port "$PORT" --token "$TOKEN"
+zcrepl csi-status --control-url http://127.0.0.1:9788 --repl-id "$REPL"
+
+zcrepl csi-recv --socket /var/lib/zcblock-csi-b/control.sock --volume "$VOL" --token auto
+</code></pre>
+<p><code>zcpit</code> exposes the file-level PIT snapshot primitive used by the CSI
+file-loop zero-copy path:</p>
+<pre><code class="language-bash">zcpit snapshot --source /path/source.img --snapshot /path/snap.img --mode reflink
+</code></pre>
+<p>The current controller and <code>zcrepl send/recv</code> path is intentionally a correctness
+baseline: it is encrypted, authenticated, and topology-addressable, but it still
+uses normal read/write copies at the process boundary. The zero-copy production
+path should promote the tcpmux parallel lane/topology metadata and descriptor
+lease model into this API, so a source extent can stay aligned from source queue
+to network lane to target disk queue without being collapsed through an
+unlabeled process pipe.</p>
+<h2 id="usable-today">Usable Today</h2>
+<p>One-shot encrypted block or snapshot copy:</p>
+<pre><code class="language-bash"># target
+TOKEN="$(zc-tcpmux-receive --generate-token)"
+zc-tcpmux-receive \
+  --listen-address 0.0.0.0 \
+  --port 42000 \
+  --token "$TOKEN" \
+  --output /path/or/block-device
+
+# source
+zc-tcpmux-send \
+  --peer-address target-node \
+  --port 42000 \
+  --token "$TOKEN" \
+  --input /path/or/block-device
+</code></pre>
+<p>The default transport is AES-256-GCM. Use <code>--encryption none</code> only for explicit
+plaintext tests.</p>
+<p>Forward encrypted data through a middle node without decrypting there:</p>
+<pre><code class="language-bash">zc-tcpmux-receive \
+  --listen-address 0.0.0.0 \
+  --port 42000 \
+  --token "$TOKEN" \
+  --already-encrypted \
+  --output - |
+zcforward \
+  --queue-depth 8 \
+  --to-tcpmux target-node:43000 \
+  --token "$TOKEN" \
+  --already-encrypted \
+  --to "zcdecrypt --token '$TOKEN' | zcsink --consume checksum"
+</code></pre>
+<p>This shape is useful for A -&gt; B -&gt; C tests where B must forward ciphertext and
+also locally consume or inspect the plaintext view.</p>
+<h2 id="required-gateway">Required Gateway</h2>
+<p>For real async replica service, add a gateway with these roles:</p>
+<ol>
+<li>Ingest zc-originated block/WAL records from many sources.</li>
+<li>Coalesce records by <code>(tenant, policy, source volume, target topology, destination disk, lane)</code>.</li>
+<li>Schedule each coalesced stream through hierarchical token buckets.</li>
+<li>Send extents over one or more <code>zc-tcpmux</code> aggregate links.</li>
+<li>Charge downstream disk admission and durable write completion back to the
+same replication budget.</li>
+<li>Emit durable watermarks for snapshot catchup and WAL replay.</li>
+</ol>
+<p>The gateway should schedule by cost, not by raw bytes alone. A write consumes
+tokens from every applicable bucket:</p>
+<pre><code class="language-text">root
+  tenant
+    tenant class or policy
+      volume
+        stream kind: snapshot | wal | catchup
+          destination region
+            destination disk / topology group
+</code></pre>
+<p>Each node in the tree can provide:</p>
+<ul>
+<li><code>rate_bytes_per_sec</code></li>
+<li><code>burst_bytes</code></li>
+<li><code>priority</code></li>
+<li><code>max_inflight_extents</code></li>
+<li><code>deadline_ms</code> or <code>latency_class</code></li>
+<li><code>drop_or_defer</code> policy for temporary overload</li>
+</ul>
+<p>The downstream disk must participate in the same accounting. The target should
+ACK only after the extent is admitted to its durable path, or after it has been
+admitted to a bounded hot tier whose spill/backing policy is part of the SLA.
+That ACK returns credits to the gateway. If the target disk slows down, the
+tenant's replication tokens drain and source backpressure follows naturally.
+The hot tier, spill queue, cold backing path, and any rehydration behavior are
+userspace target/gateway responsibilities, even when the last hop is a block
+device such as <code>/dev/zcbrdN</code> or an allowlisted raw partition.</p>
+<h2 id="stream-types">Stream Types</h2>
+<p><code>wal</code>: continuous logical record stream. Usually smaller extents, latency
+bounded, ordered per lane, ACKed by durable extent sequence. This is the normal
+steady-state replication path and remains attached for the lifetime of a
+replica.</p>
+<p><code>catchup</code>: retained WAL replay from an older durable HWM to the live WAL
+watermarks. It should be scheduled below live WAL so a recovering replica
+converges without starving foreground replication.</p>
+<p><code>snapshot</code>: exceptional bulk seeding of a new replica, PITR capture, or repair
+when the retained WAL is insufficient. It is usually large, low priority, high
+burst, and resumable by byte range. Completing the image transfer is not enough
+to make a replica current; catch-up and then live WAL must follow.</p>
+<h2 id="topology-alignment">Topology Alignment</h2>
+<p>Keep lane and placement metadata all the way through:</p>
+<pre><code class="language-text">source queue -&gt; zc lane -&gt; aggregate link lane -&gt; receiver worker
+             -&gt; destination shard/queue -&gt; durable WAL/disk extent
+</code></pre>
+<p>The existing <code>zc-tcpmux-xfer</code> lane topology header and WAL extent framing are
+the right base. The gateway should not collapse lanes into one global FIFO.
+Order is per lane unless a snapshot/barrier manifest explicitly requests a
+global cut.</p>
+<h2 id="replica-bootstrap-and-wal-catchup">Replica bootstrap and WAL catchup</h2>
+<p>A coherent new or repaired async replica is:</p>
+<ol>
+<li>Create a source snapshot under the freeze/barrier protocol.</li>
+<li>Transfer the snapshot image through the gateway as <code>snapshot</code> traffic.</li>
+<li>Record the WAL cut manifest: per lane durable sequence and byte range.</li>
+<li>Replay <code>catchup</code> extents after the snapshot cut.</li>
+<li>Join the continuing live <code>wal</code> feed once the replica reaches the current
+watermark, without creating a gap between catch-up and live delivery.</li>
+</ol>
+<p>An already-current replica stays on step 5. It does not repeat the snapshot
+cycle for routine replication or failover.</p>
+<p>The <code>zcsnap</code> manifest and <code>docs/wal-extent-framing.md</code> define the logical cut
+shape. The CSI snapshot implementation gives us a source image today; the
+gateway should eventually learn how to stream that image directly instead of
+materializing every transfer as an intermediate file.</p>
+<h2 id="near-term-build-order">Near-Term Build Order</h2>
+<ol>
+<li>Add a <code>zcshape</code> byte-compatible token-bucket filter for single-stream tests.</li>
+<li>Extend <code>zcrepl</code> with explicit tenant, policy, lane, topology, and stream-kind
+labels, and keep those labels visible in logs and manifests.</li>
+<li>Add a <code>zcrepl-gateway</code> config format with hierarchical buckets and labels:
+tenant, policy, volume, stream type, destination region, destination disk.</li>
+<li>Teach the gateway to launch/own <code>zc-tcpmux</code> links and <code>zcforward</code> branches.</li>
+<li>Add target-side durable ACK records for snapshot and WAL extents.</li>
+<li>Wire CSI snapshot/volume metadata into gateway stream labels.</li>
+<li>Replace byte pipes with descriptor leases and zero-copy release accounting.</li>
+</ol>
+<p>The first step is intentionally small; the important production behavior starts
+at steps 2-4, where scheduling and target durability become part of the protocol
+rather than a side effect of shell pipe throughput.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#controller-integration">Controller Integration</a><a href="#usable-today">Usable Today</a><a href="#required-gateway">Required Gateway</a><a href="#stream-types">Stream Types</a><a href="#topology-alignment">Topology Alignment</a><a href="#replica-bootstrap-and-wal-catchup">Replica bootstrap and WAL catchup</a><a href="#near-term-build-order">Near-Term Build Order</a></nav></div></body></html>

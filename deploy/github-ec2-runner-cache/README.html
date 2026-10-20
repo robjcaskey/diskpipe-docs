@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Optional persistent runner cache · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="optional-persistent-runner-cache">Optional persistent runner cache</h1>
+<p>Deployed in AWS account <code>968134102381</code> on 2026-09-13:</p>
+<ul>
+<li>volume <code>vol-0bd047325c3a96e98</code> in <code>us-east-1a</code></li>
+<li>policy <code>arn:aws:iam::968134102381:policy/zcutils-build-cache-Rob-J-Caskey-attach</code></li>
+<li>policy attachment to <code>zcutils-fips-runner-controller</code></li>
+</ul>
+<p>GitHub repository variables contain the exact volume and zone. First-use empty
+volume formatting is enabled for the next certificate-profile build; after
+that build it must be returned to <code>false</code>. Squid remains disabled by default.</p>
+<p>This separate Terraform module defines one encrypted 20 GiB gp3 EBS volume in
+one explicit availability zone and an IAM policy for attaching that exact
+volume only to instances carrying the configured <code>RunnerPool</code> tag. The policy
+is attached to the one existing role named by <code>controller_role_name</code>. It creates
+no EC2 instances, launch templates, network interfaces, public addresses, or
+instance-type/AMI restrictions. The main runner controller remains responsible
+for allowing trusted workflows to select any reviewed concrete AMI and instance
+type in its dedicated network and for requiring its existing cleanup tags.
+The attach policy independently requires the runner's <code>terminate</code> keepalive
+mode and a bounded-format <code>ExpiresAt</code> tag; it does not relax launch permission.</p>
+<p>The volume is static, same-AZ, and single-writer. gp3 does not support EBS
+Multi-Attach, <code>multi_attach_enabled</code> is explicitly false, and the bootstrap
+rejects anything except one attachment to the current instance. EC2 detaches
+the non-root static volume during instance termination; controller cleanup
+waits for the volume to return to <code>available</code> before removing its independent
+termination schedule. <code>prevent_destroy</code> requires a deliberate source review
+before deleting the persistent cache.</p>
+<p>The volume incurs EBS storage cost. An administrator can review future changes
+with:</p>
+<pre><code class="language-sh">terraform init
+terraform plan -var aws_account_id=968134102381 \
+  -var availability_zone=us-east-1a \
+  -var controller_role_name=zcutils-fips-runner-controller
+</code></pre>
+<p>Applying the plan creates the volume, IAM policy, and role-policy attachment,
+but does not attach the volume or launch an instance. Those external steps
+require separate approval. Store the exact <code>volume_id</code> and <code>availability_zone</code>
+outputs as <code>AWS_FIPS_RUNNER_CACHE_VOLUME_ID</code> and
+<code>AWS_FIPS_RUNNER_CACHE_AVAILABILITY_ZONE</code>. Only the FIPS build label consumes
+them; an empty volume ID disables the cache. A brand-new volume has no
+filesystem. Set <code>AWS_FIPS_RUNNER_CACHE_ALLOW_FORMAT_EMPTY=true</code> for exactly the
+reviewed first build, then immediately return it to <code>false</code>; root formats only
+the exact controller-validated empty volume. After an ephemeral AL2023 runner
+has the volume attached, check it
+before any formatting or mount action:</p>
+<pre><code class="language-sh">sudo scripts/configure-runner-build-cache.sh --check \
+  --volume-id vol-0123456789abcdef0 \
+  --device /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0
+</code></pre>
+<p><code>--apply --allow-format-empty</code> is deliberately required for first use. It
+creates persistent Cargo registry/git download directories and a DNF package
+cache. It deliberately does not persist <code>CARGO_TARGET_DIR</code>: compiled Cargo
+outputs on this unsigned disk are not authenticated. Signed, digest-pinned OCI
+BuildKit cache is the only reusable compiled/layer cache. Run DNF through
+<code>zcutils-dnf-cache</code>; Cargo.lock checksums and signed RPM repository metadata
+remain the content-integrity authorities.</p>
+<p><code>--enable-squid</code> optionally installs Squid with
+<code>config/squid-runner-build-cache.conf</code>. It listens only on <code>127.0.0.1:3128</code> and
+can cache ordinary cacheable HTTP responses. HTTPS uses opaque CONNECT tunnels:
+there is no TLS interception and CONNECT content is not cached. Squid never
+decides whether a Docker BuildKit cache is trusted; the digest and cosign checks
+in <code>scripts/zc-image-attest.py</code> remain mandatory.</p>
+<p>The automated root bootstrap provides the same loopback-only service when
+<code>AWS_FIPS_RUNNER_CACHE_ENABLE_SQUID=true</code>; it defaults to <code>false</code> because the
+current AWS-LC, Cargo, and repository downloads use HTTPS, whose CONNECT
+payload Squid cannot content-cache without forbidden TLS interception. Enabling
+it sets loopback <code>HTTP_PROXY</code>/<code>http_proxy</code> for the runner service and exempts
+localhost and IMDS. It does not set <code>HTTPS_PROXY</code> or intercept TLS.</p>
+<p>Certificate-profile workers always run the digest-pinned Docker Distribution
+registry on <code>127.0.0.1:5000</code>, backed by the volume's <code>registry/</code> directory.
+BuildKit runs in host-network mode using
+<code>config/buildkit-loopback-registry.toml</code>, so the registry is reachable from the
+builder container but never exposed on the instance's public interface. Cache
+manifests are KMS-signed and builder-identity-bound before a later build may
+import them. Docker Hub receives only the final FIPS-aspiring runtime image and
+its signature.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

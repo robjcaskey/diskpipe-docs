@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Cross-region getting started 3: recovery policy and approval gates · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="cross-region-getting-started-3-recovery-policy-and-approval-gates">Cross-region getting started 3: recovery policy and approval gates</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> the policy resources, HTTPS gate protocol,
+and end-to-end workflow on this page are the implementation contract. They are
+not yet delivered by the current chart.</p>
+</blockquote>
+<p>This tutorial keeps automatic failover and failback, then adds two controls:</p>
+<ul>
+<li>recovery order is derived from solution RPO, RTO, consistency, and business
+impact rather than a user-assigned numeric priority; and</li>
+<li>an optional organization-operated HTTPS service can approve, deny, or hold the final
+ownership switch for selected volumes.</li>
+</ul>
+<p>The transition gate is distinct from tutorial two's capacity provider. A
+capacity provider obtains compute and media. A transition gate decides whether
+an otherwise safe, ready ownership change may proceed.</p>
+<p>The gate is never in the storage data path. Replication, catch-up, capacity
+activation, and safety checks continue while a transition waits. Approval can
+permit an exact safe plan; it cannot waive fencing, durability, trust,
+consistency, or performance requirements.</p>
+<p>You can reuse the one-cluster laboratory from <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">tutorial
+one</a>. This page
+shows three production-like clusters explicitly. Clusters prepared with the
+<a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">regional getting-started
+guide</a> are also suitable.</p>
+<h2 id="1-install-the-three-regional-members">1. Install the three regional members</h2>
+<p>Create namespace <code>zccusan</code> in contexts <code>region-a</code>, <code>region-b</code>, and <code>region-c</code>:</p>
+<pre><code class="language-bash">kubectl --context region-a create namespace zccusan
+kubectl --context region-b create namespace zccusan
+kubectl --context region-c create namespace zccusan
+</code></pre>
+<p>Set <code>ZCCUSAN_VERSION</code> to the release supporting this tutorial. Install A:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-a --namespace zccusan \
+  --set region.id=region-a \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install B:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-b --namespace zccusan \
+  --set region.id=region-b \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install C:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-c --namespace zccusan \
+  --set region.id=region-c \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Create or rejoin <code>tutorial-global</code> using the bounded invitation workflow from
+<a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_FAILOVER_ON_KUBERNETES.html">tutorial two</a>.
+Do not create three unrelated federations with the same display name.</p>
+<h2 id="2-describe-solutions-instead-of-assigning-priorities">2. Describe solutions instead of assigning priorities</h2>
+<p>The example estate has three solution groups:</p>
+<ul>
+<li><code>checkout</code> has PostgreSQL data and WAL volumes that must move at one
+consistency cut;</li>
+<li><code>catalog-search</code> tolerates a longer interruption but has a bounded regional
+RPO; and</li>
+<li><code>development</code> should remain in ordered durable backlog during severe
+capacity shortage instead of displacing production recovery.</li>
+</ul>
+<p>Create <code>recovery-policies.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: ConsistencySet
+metadata:
+  name: checkout
+  namespace: zccusan
+spec:
+  members:
+    - volume: checkout-postgres-data
+    - volume: checkout-postgres-wal
+  recoveryCut: Atomic
+---
+apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: checkout-recovery
+  namespace: zccusan
+spec:
+  federationRef: tutorial-global
+  consistencySetRef: checkout
+  preferredWriteRegion: region-a
+  recoveryObjectives:
+    - failureSet: [region-a]
+      rpo: 1s
+      rto: 30s
+    - failureSet: [region-a, region-b]
+      rpo: 1m
+      rto: 3h
+  businessImpact:
+    downtimeCostPerHour:
+      amount: "100000"
+      currency: USD
+    rtoBreachCost:
+      amount: "500000"
+      currency: USD
+  performance:
+    guaranteedIops: 20000
+    enforceDuring: [Failover, Failback, Snapshot, Migration]
+---
+apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: catalog-search-recovery
+  namespace: zccusan
+spec:
+  federationRef: tutorial-global
+  volumeSelector:
+    matchNames: [catalog-search]
+  preferredWriteRegion: region-a
+  recoveryObjectives:
+    - failureSet: [region-a]
+      rpo: 30s
+      rto: 15m
+  businessImpact:
+    downtimeCostPerHour:
+      amount: "10000"
+      currency: USD
+  performance:
+    guaranteedIops: 5000
+    enforceDuring: [Failover, Failback]
+---
+apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: development-recovery
+  namespace: zccusan
+spec:
+  federationRef: tutorial-global
+  volumeSelector:
+    matchLabels:
+      environment: development
+  recoveryObjectives:
+    - failureSet: [region-a]
+      rpo: 15m
+      rto: 8h
+    - failureSet: [region-a, region-b]
+      action: HoldDurably
+  businessImpact:
+    downtimeCostPerHour:
+      amount: "100"
+      currency: USD
+</code></pre>
+<p>Apply the objects once through a healthy federation member:</p>
+<pre><code class="language-bash">kubectl --context region-a apply -f recovery-policies.yaml
+zcctl recovery preview --unavailable region-a --all-affected
+zcctl recovery preview --unavailable region-a,region-b --all-affected
+</code></pre>
+<p>The scheduler evaluates affected flows together. It accounts for destination
+IOPS, bandwidth, CPU, NIC, PCIe, WAL, media, replay, targeted demultiplexing,
+and time to a mountable view. It may leave development volumes multiplexed in
+durable WAL storage while admitting checkout as one consistency gang.</p>
+<p>The report explains the derived order, capacity reservations, estimated RPO and
+RTO, and every objective miss. It never reduces these inputs to an unexplained
+numeric priority.</p>
+<h2 id="3-optionally-define-an-https-transition-gate">3. Optionally define an HTTPS transition gate</h2>
+<p>The end-user organization's service implements:</p>
+<pre><code class="language-text">POST /v1/transition-decisions
+Content-Type: application/json
+Idempotency-Key: &lt;transition-id&gt;
+</code></pre>
+<p>The request contains no volume payload or encryption key. It binds a decision
+to one immutable plan:</p>
+<pre><code class="language-json">{
+  "schemaVersion": "v1alpha1",
+  "transitionId": "01J...",
+  "transitionType": "Failover",
+  "sourceRegion": "region-a",
+  "targetRegion": "region-b",
+  "volumeSetDigest": "sha256:...",
+  "planDigest": "sha256:...",
+  "estimatedRpoMillis": 0,
+  "estimatedRtoMillis": 18000,
+  "allMandatoryObjectivesSatisfied": true,
+  "approvalExpiresAt": "2026-09-05T18:30:00Z"
+}
+</code></pre>
+<p>The service returns <code>Approve</code>, <code>Deny</code>, or <code>Hold</code> for the same transition and
+digest:</p>
+<pre><code class="language-json">{
+  "transitionId": "01J...",
+  "planDigest": "sha256:...",
+  "decision": "Approve",
+  "validUntil": "2026-09-05T18:30:00Z"
+}
+</code></pre>
+<p><code>Hold</code> may use HTTP 202; the controller retries with the same idempotency key.
+Network errors, malformed or trickle-fed responses, expiry, a changed plan
+digest, and timeout all fail closed to <code>Hold</code>.</p>
+<p>Store the service CA and client identity in a Secret populated by the normal
+secret manager. Then create <code>transition-gate.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: TransitionApprovalPolicy
+metadata:
+  name: production-change-control
+  namespace: zccusan
+spec:
+  appliesTo:
+    transitionTypes: [Failover, Failback]
+    policyNames:
+      - checkout-recovery
+      - catalog-search-recovery
+  endpoint:
+    url: https://change-control.example.com/v1/transition-decisions
+    caBundleSecretRef:
+      name: change-control-client
+      key: ca.crt
+    clientCertificateSecretRef:
+      name: change-control-client
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+  requestTimeout: 2s
+  decisionTtl: 5m
+  failurePolicy: Hold
+</code></pre>
+<pre><code class="language-bash">kubectl --context region-a apply -f transition-gate.yaml
+zcctl transition-gate status production-change-control
+</code></pre>
+<p>The global leader calls HTTPS outside the deterministic Raft state machine. It
+commits the authenticated decision and exact plan digest through Raft before
+switching ownership. A new leader can therefore resume safely without calling
+an external service during log replay.</p>
+<p>Volumes not selected by the gate retain automatic behavior. Removing a gate
+returns them to automation only after the policy change commits; deletion does
+not implicitly approve an already waiting transition.</p>
+<h2 id="4-exercise-gated-failover-and-failback">4. Exercise gated failover and failback</h2>
+<p>Start one canary per solution and isolate A with the separately installed chaos
+toolbox:</p>
+<pre><code class="language-bash">zcctl canary start checkout --context region-a --continuous
+zcctl canary start catalog-search --context region-a --continuous
+zcctl canary start development --context region-a --continuous
+zcctl transition watch --all
+</code></pre>
+<p>Replication and target preparation continue. Checkout and catalog stop at
+<code>AwaitingApproval</code> with a stable plan digest. Development follows its own
+policy and may remain in durable backlog. Approve the exact pending digest
+through the organization-operated service, then observe the transition resume:</p>
+<pre><code class="language-bash">zcctl transition describe &lt;transition-id&gt;
+zcctl transition watch &lt;transition-id&gt;
+</code></pre>
+<p>Approval of an old digest is rejected if capacity, target, consistency-set
+membership, or selected recovery cut changes. Restore A and repeat the
+observation for failback: resynchronization and capacity admission happen
+first, then the final switch waits for its independently scoped approval.</p>
+<h2 id="5-audit-and-clean-up">5. Audit and clean up</h2>
+<pre><code class="language-bash">zcctl transition audit --volume-set checkout
+zcctl recovery preview --unavailable region-a --all-affected
+</code></pre>
+<p>The audit identifies observed HWMs, the selected cut, fencing evidence,
+capacity reservation, policy revision, plan digest, approval identity, and
+Raft commit. It contains no plaintext volume key or user payload.</p>
+<p>Remove the gate before its TLS Secret, then remove policies and federation
+state before uninstalling:</p>
+<pre><code class="language-bash">kubectl --context region-a delete -f transition-gate.yaml
+kubectl --context region-a delete -f recovery-policies.yaml
+zcctl federation delete tutorial-global --wait
+helm uninstall zccusan --kube-context region-c --namespace zccusan
+helm uninstall zccusan --kube-context region-b --namespace zccusan
+helm uninstall zccusan --kube-context region-a --namespace zccusan
+</code></pre>
+<p>Continue with <a href="../reference/docs/global-volume-failover.html">global volume failover</a>,
+<a href="../reference/docs/lane-flow-scheduler.html">lane/flow scheduling</a>, and <a href="../reference/docs/GLOBAL_TRANSPORT_SECURITY.html">global
+transport security</a>. For a different
+multi-region trust model, continue with <a href="../docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_HOSTING_ON_KUBERNETES.html">offering tightly bounded storage to an
+untrusted federated peer</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-install-the-three-regional-members">1. Install the three regional members</a><a href="#2-describe-solutions-instead-of-assigning-priorities">2. Describe solutions instead of assigning priorities</a><a href="#3-optionally-define-an-https-transition-gate">3. Optionally define an HTTPS transition gate</a><a href="#4-exercise-gated-failover-and-failback">4. Exercise gated failover and failback</a><a href="#5-audit-and-clean-up">5. Audit and clean up</a></nav></div></body></html>

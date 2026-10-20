@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Global transport security and secret lifecycle · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="global-transport-security-and-secret-lifecycle">Global transport security and secret lifecycle</h1>
+<h2 id="threat-boundary">Threat boundary</h2>
+<p>Every cross-region segment is untrusted. This is a hard invariant, not a
+default that an administrator can relax. Same-AZ and same-region trust are
+separate policy inputs and both default to <code>untrusted</code>. Marking a local segment
+trusted may remove redundant local controls in a future adapter; it never
+creates an identity, authorizes a federation, or makes trust transitive.</p>
+<p>All user data crossing a network boundary must use authenticated encryption.
+The supported policy targets are:</p>
+<ul>
+<li><code>native-aead</code>: authenticated payload encryption with
+<code>public_envelope_v1</code>; this is the native performance mode.</li>
+<li><code>native-aead+tls</code>: the same native protection inside mutually authenticated
+TLS; this is the check-the-box TLS mode.</li>
+</ul>
+<p>TLS measurements are compliance/regression results. They must be labeled
+<code>headline_performance_eligible=false</code> and must not replace native-AEAD results
+in performance records. This does not permit a plaintext benchmark to be
+published as representative.</p>
+<p><code>public_envelope_v1</code> permits only protocol magic/version, direction, an
+unpredictable nonce, ciphertext length, and audited transport flags outside
+the authenticated ciphertext. A lane-oriented data protocol may additionally
+declare lane ordinal/count and frame sequence only after those fields have been
+reviewed as non-sensitive for that protocol. Tenant, federation, node, cluster,
+region, volume and object IDs; logical offsets; topology names; CPU/NUMA
+placement; plan hashes; placement epochs; plaintext checksums; user bytes; and
+error details are sensitive and must not occur in the public envelope. Adding
+a field requires a new reviewed framing profile rather than silently extending
+version 1.</p>
+<p>The Raft policy API can declare either transport mode and independently set
+same-AZ/same-region trust. Cross-region remains untrusted in code. A transport
+adapter must fail closed if it cannot realize the committed mode. Global Raft
+and management RPC now use <code>native-aead</code> by default: their complete JSON
+document is encrypted with AES-256-GCM and the fixed 28-byte public envelope is
+authenticated as additional data. Request and response keys are domain
+separated. There is no plaintext compatibility fallback.</p>
+<p>The existing TCP-mux data-plane topology header has not yet earned
+<code>public_envelope_v1</code> conformance and must not be selected for an untrusted
+segment. In particular, its current token preamble and topology fields are not
+made safe merely because policy declares a secure mode. Policy declaration is
+not evidence of wire conformance. Adapters must call the control-path
+<code>LinkTransportSecurity::validate_realization</code> check before activation. The
+legacy TCP mux capability descriptor fails that check for both modes.</p>
+<h2 id="global-rpc-tls-mode">Global RPC TLS mode</h2>
+<p>Set <code>ZCGLOBAL_RPC_TRANSPORT=native-aead+tls</code> to wrap the native encrypted frame
+in mutually authenticated TLS 1.3. TLS supplements native protection; it never
+replaces it. All four identity settings are then required and startup fails
+closed if any is absent:</p>
+<div class="table-scroll"><table><thead><tr><th>Setting</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>ZCGLOBAL_TLS_CA_FILE</code></td><td>PEM trust bundle used for both server and client verification</td></tr>
+<tr><td><code>ZCGLOBAL_TLS_CERT_FILE</code></td><td>PEM certificate chain presented by this node/client</td></tr>
+<tr><td><code>ZCGLOBAL_TLS_KEY_FILE</code></td><td>PEM private key; must be a mode-0600 regular file</td></tr>
+<tr><td><code>ZCGLOBAL_TLS_SERVER_NAME</code></td><td>DNS name or IP verified on every outbound connection</td></tr>
+</tbody></table>
+</div>
+<p>The protocol is TLS 1.3 only, requires a client certificate, and negotiates the
+<code>zcglobal-rpc/1</code> ALPN identifier. CA, certificate, and key files are rebuilt
+for every new connection, so an atomic file replacement rotates identities and
+overlapping CA bundles without restarting a node. Existing connections may
+drain; this RPC currently uses one request per connection.</p>
+<p>Node readiness and status expose <code>rpc_transport</code> and
+<code>headline_performance_eligible</code>. The value is <code>false</code> whenever TLS is enabled.
+Benchmark publication must preserve that field and must never promote a TLS
+run to the native-AEAD headline series.</p>
+<h2 id="secret-lifecycle-invariant">Secret lifecycle invariant</h2>
+<p>Every credential has all of the following:</p>
+<ol>
+<li>a non-secret version ID and monotonically increasing generation;</li>
+<li>explicit <code>not_before</code> and hard <code>expires_at</code> timestamps;</li>
+<li>a configured maximum TTL and rotate-before threshold;</li>
+<li>an overlap mechanism where old and new credentials are independently valid;</li>
+<li>atomic publication and reload without an I/O-hot-path lookup;</li>
+<li>fail-closed behavior after the last accepted version expires;</li>
+<li>redacted logs and status that reports IDs/times, never secret bytes; and</li>
+<li>a tested replacement and revocation procedure.</li>
+</ol>
+<p>The management credential file is a mode-0600 JSON bundle. It has one preferred
+credential and retains unexpired predecessors during rollout. Rotation prunes
+expired versions, adds a new active version, and never extends a predecessor's
+expiry. Servers periodically reload the file and retain their last valid copy
+through a transient file error, but that retained copy still expires normally.
+Clients try the preferred credential and can fall back to an unexpired
+predecessor while publication reaches all servers.</p>
+<p>AWS Parameter Store, AWS Secrets Manager, and HashiCorp Vault materialization
+are described in <code>FOUNDATIONAL_SECRET_PROVIDERS.md</code>. They use workload identity
+and a separate lightweight helper/agent so provider SDKs and provider access do
+not enter the storage binaries.</p>
+<p>Configuration:</p>
+<div class="table-scroll"><table><thead><tr><th>Setting</th><th style="text-align: right">Default</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>ZCGLOBAL_ADMIN_MAX_TTL</code></td><td style="text-align: right"><code>90d</code></td><td>Hard maximum validity of one management credential</td></tr>
+<tr><td><code>ZCGLOBAL_ADMIN_ROTATE_BEFORE</code></td><td style="text-align: right"><code>7d</code></td><td>Status threshold indicating rotation is due</td></tr>
+<tr><td><code>ZCGLOBAL_ADMIN_RELOAD_INTERVAL</code></td><td style="text-align: right"><code>250ms</code></td><td>Control-plane file reload cadence</td></tr>
+<tr><td><code>ZCGLOBAL_ADMIN_ACTIVATION_CLOCK_SKEW</code></td><td style="text-align: right"><code>2s</code></td><td>Early activation allowance; never extends expiry</td></tr>
+<tr><td><code>ZCGLOBAL_ADMIN_MAX_VERSIONS</code></td><td style="text-align: right"><code>16</code></td><td>Bound on overlapping credentials</td></tr>
+</tbody></table>
+</div>
+<p>Durations accept <code>ms</code>, <code>s</code>, <code>m</code>, <code>h</code>, or <code>d</code>. Initialize and rotate atomically:</p>
+<pre><code class="language-console">zcglobal-policy-node credential-init /run/secrets/zcglobal-admin.json 30s
+zcglobal-policy-node credential-rotate /run/secrets/zcglobal-admin.json 30s
+zcglobal-policy-node credential-status /run/secrets/zcglobal-admin.json
+</code></pre>
+<p>For a deliberately aggressive continuous-rotation test:</p>
+<pre><code class="language-console">scripts/zcglobal-credential-rotation-smoke.sh
+</code></pre>
+<p>That test uses a 30-second TTL, rotates every 10 seconds three times, maintains
+a sub-second status subscription, and commits a Raft policy mutation after each
+rotation.</p>
+<p>The TLS conformance variant generates an ephemeral CA/node identity, repeats
+the rotation workload through mutual TLS 1.3, verifies that a client without a
+certificate is rejected, and asserts the result is headline-ineligible:</p>
+<pre><code class="language-console">scripts/zcglobal-transport-security-smoke.sh
+</code></pre>
+<p>One-use TCP-mux/replication authentication tokens are generated as expiring
+<code>zct1</code> credentials. <code>ZC_TRANSFER_TOKEN_TTL_SECS</code> defaults to 900 and may not
+exceed <code>ZC_TRANSFER_TOKEN_MAX_TTL_SECS</code> (default 3600). Expiry is checked when a
+new connection authenticates; an already authenticated transfer is not killed
+mid-frame. Legacy non-expiring authentication tokens fail closed unless the
+temporary migration escape hatch <code>ZC_ALLOW_LEGACY_NONEXPIRING_TOKENS=1</code> is set.
+The escape hatch is not an acceptable steady-state configuration.</p>
+<p>Volume data-encryption keys are not bearer credentials. Their rotation story is
+cryptographic erasure plus re-wrapping: volume DEKs remain random and stable for
+existing ciphertext extents, while versioned KMS/HSM KEKs rotate and re-wrap
+DEKs without bulk data rewriting. New writes may advance to a new DEK epoch.
+Only wrapped DEKs and key IDs may be referenced by policy; plaintext keys never
+enter Raft. This key-envelope implementation remains outstanding.</p>
+<p>TLS certificate/private-key rotation uses overlapping trust bundles and
+new-connection config reload. Certificate validity is checked by the TLS peer
+on every handshake. The external certificate issuer/controller remains
+responsible for configurable expiry thresholds and overlap timing; the global
+RPC does not extend X.509 validity. TLS support for data-plane adapters remains
+outstanding, so selecting <code>native-aead+tls</code> must fail closed in any adapter that
+does not explicitly advertise that capability.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#threat-boundary">Threat boundary</a><a href="#global-rpc-tls-mode">Global RPC TLS mode</a><a href="#secret-lifecycle-invariant">Secret lifecycle invariant</a></nav></div></body></html>

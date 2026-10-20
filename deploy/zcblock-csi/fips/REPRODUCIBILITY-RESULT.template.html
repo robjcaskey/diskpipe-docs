@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Reproduced executable bundle: {{SOURCE_REVISION_SHORT}} · Diskpipe</title><link rel="stylesheet" href="../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../index.html">Diskpipe</a><a href="../../../kubernetes.html">With Kubernetes</a><a href="../../../standalone.html">Without Kubernetes</a><a href="../../../day-2.html">Day-two operations</a><a href="../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content">Copy this file to fips/reproduced/&lt;12-character-source-revision&gt;/README.md
+after the comparison command has succeeded. Replace every {{PLACEHOLDER}},
+resolve the conditional paragraphs, and remove this comment before publishing.
+Never copy a previous release's passing hashes or signatures into a new result.
+See REPRODUCIBILITY-ADMISSION.md for the badge update procedure.
+--&gt;
+<h1 id="reproduced-executable-bundle-sourcerevisionshort">Reproduced executable bundle: {{SOURCE_REVISION_SHORT}}</h1>
+<p>On {{VERIFICATION_DATE_UTC}}, two separate EC2 workers built revision
+<code>{{SOURCE_REVISION_FULL}}</code> with network access disabled during native-provider
+and application compilation. All {{EXECUTABLE_COUNT}} shipped executables,
+<code>bcm.o</code>, normalized <code>libcrypto.a</code>, and the complete unsigned executable bundle
+matched byte-for-byte. This is a project-run comparison signed by
+{{SIGNING_AUTHORITY}}, not independent third-party verification or FIPS
+certification.</p>
+<div class="table-scroll"><table><thead><tr><th>Build</th><th>GitHub run</th><th>Worker</th><th>Published image digest</th></tr></thead><tbody>
+<tr><td>First</td><td><span title="Template placeholder">{{FIRST_RUN_ID}}</span></td><td><code>{{FIRST_WORKER_ID}}</code></td><td><code>{{FIRST_IMAGE_REPOSITORY}}@sha256:{{FIRST_IMAGE_SHA256}}</code></td></tr>
+<tr><td>Second</td><td><span title="Template placeholder">{{SECOND_RUN_ID}}</span></td><td><code>{{SECOND_WORKER_ID}}</code></td><td><code>{{SECOND_IMAGE_REPOSITORY}}@sha256:{{SECOND_IMAGE_SHA256}}</code></td></tr>
+</tbody></table>
+</div>
+<p>Both builds used effective build timestamp <code>{{EFFECTIVE_BUILD_TIMESTAMP}}</code>.
+The second build asserted this unsigned executable bundle SHA-256 before signing
+or publishing:</p>
+<pre><code class="language-text">{{UNSIGNED_EXECUTABLE_BUNDLE_SHA256}}
+</code></pre>
+<p>{{ONLINE_COMPARISON_STATEMENT: state whether an optional online/offline comparison
+ran, which run performed it, and whether it passed. Normal builds compile offline
+only; do not imply every result includes an online comparison.}}</p>
+<p>{{INPUT_PROVENANCE_STATEMENT: identify whether the workers shared a dependency
+cache, how inputs were obtained and checked, and confirm fresh compilation
+targets. State whether independently sourced archives were tested. Offline
+compilation alone does not establish air-gapped preparation or signing.}}</p>
+<p>The <span title="Template placeholder">comparison</span> records each executable and
+provider hash, compiler identity, source identity, and distinct worker IDs.
+The <span title="Template placeholder">signed manifest</span> identifies both images, runs,
+timestamps, and hashes of the comparison, badge data, and
+<span title="Template placeholder">admission policy</span>.</p>
+<p>{{VERIFICATION_STATEMENT: identify the trusted key and fingerprint; record checks
+of both downloaded artifact sets, detached bundle and SBOM signatures, actual
+bundle hashes, registry image signatures, and registry SPDX/CycloneDX predicates
+and image bindings. Describe only checks actually completed. State whether
+transparency-log inclusion was checked.}}</p>
+<p>To authenticate the manifest from the repository root, first approve the public
+key through your own trust process, then run:</p>
+<pre><code class="language-sh">result=zccusan/deploy/zcblock-csi/fips/reproduced/{{SOURCE_REVISION_SHORT}}
+cosign verify-blob \
+  --key {{TRUSTED_PUBLIC_KEY_REPOSITORY_PATH}} \
+  --insecure-ignore-tlog \
+  --bundle "$result/verification-manifest.cosign.bundle" \
+  "$result/verification-manifest.json"
+python3 - "$result" &lt;&lt;'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / 'verification-manifest.json').read_text())
+for name, expected in manifest['files'].items():
+    assert hashlib.sha256((root / name).read_bytes()).hexdigest() == expected, name
+print('Manifest-bound comparison, badge, and policy hashes verified')
+PY
+</code></pre>
+<p>The command above uses pinned-key verification without transparency-log checking.
+For a new rebuild, follow
+<span title="Template placeholder">Reproduced executables and image admission</span>.
+For registry verification and verification without Cosign, follow the
+<span title="Template placeholder">image validation guide</span>.</p>
+<p>{{ARCHIVE_STATEMENT: give the build and launch artifact names, retention period,
+and any durable archive location. Explain which original artifacts must be
+retained to repeat the comparison after GitHub artifacts expire.}}</p>
+<p>The badge applies only to this revision and unsigned executable bundle.
+SBOM bytes, OCI metadata, signature envelopes, later source revisions, and
+deployment conformance are outside this comparison.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

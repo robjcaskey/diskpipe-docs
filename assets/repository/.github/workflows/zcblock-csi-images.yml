@@ -1,0 +1,370 @@
+name: zcblock-csi image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*', 'release-*']
+  schedule:
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref to build (defaults to the triggering ref)
+        required: false
+        type: string
+      image_tag:
+        description: Explicit image tag (for reproducible release rebuilds)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tags: ${{ steps.tags.outputs.tags }}
+      source_sha: ${{ steps.source.outputs.sha }}
+      release: ${{ steps.tags.outputs.release }}
+      kmod_matrix: ${{ steps.kmod_matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Compute image tags
+        id: tags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${SOURCE_SHA::7}"
+          tags="sha-${short_sha}"
+          release=false
+          if [ -n "${REQUESTED_TAG}" ]; then
+            [[ "${REQUESTED_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || exit 1
+            tags="${tags},${REQUESTED_TAG}"
+            [[ "${REQUESTED_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && release=true
+          elif [ "${EVENT_NAME}" = schedule ]; then
+            tags="${tags},nightly,nightly-$(date -u +%Y%m%d)"
+          elif [ "${REF_TYPE}" = tag ]; then
+            semver="${REF_NAME#v}"
+            tags="${tags},${semver}"
+            release=true
+            if [[ "${semver}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              tags="${tags},${BASH_REMATCH[1]}.${BASH_REMATCH[2]},${BASH_REMATCH[1]}"
+            elif [[ "${semver}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+              tags="${tags},${BASH_REMATCH[1]}.${BASH_REMATCH[2]},${BASH_REMATCH[1]}"
+            fi
+          elif [ "${REF_NAME}" = main ]; then
+            tags="${tags},main,latest"
+          else
+            safe_ref="${REF_NAME//\//-}"
+            tags="${tags},${safe_ref},${safe_ref}-sha-${short_sha}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive exact kernel ABI build jobs
+        id: kmod_matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c '{include: [
+            .targets | to_entries[] |
+            {
+              target: .key,
+              runner: (
+                if .value.architecture == "arm64" and .value.family != "cos"
+                then "ubuntu-24.04-arm"
+                else "ubuntu-24.04"
+                end
+              )
+            }
+          ]}' kmods/matrix/targets.json)"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+
+  kmod-build:
+    name: Build bundled module (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.kmod_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Cache pinned headers and toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/zccusan-kmod-matrix
+          key: zcnblk-kmod-${{ matrix.target }}-${{ hashFiles('kmods/matrix/targets.json', 'kmods/matrix/cos-kernel-devenv*', 'kmods/matrix/nixos-module.nix') }}
+      - name: Build exact kernel ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/zccusan-build-kmod-matrix.sh \
+            --target '${{ matrix.target }}' \
+            --engine docker
+      - name: Upload exact-ABI bundle input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zcnblk-kmod-${{ matrix.target }}
+          path: dist/zccusan-kmod-matrix/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    name: Build zcblock-csi (${{ matrix.arch }})
+    needs: [prepare, kmod-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, platform: linux/amd64, runner: ubuntu-24.04}
+          - {arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+      - name: Download all exact-ABI module artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: zcnblk-kmod-*
+          path: dist/downloaded-kmods
+      - name: Audit and stage architecture-local DaemonSet bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/zccusan-package-daemonset-kmods.sh \
+            --architecture '${{ matrix.arch }}' \
+            --artifacts dist/downloaded-kmods \
+            --output dist/zccusan-daemonset-kmods
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to Docker Hub with bounded retries
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'robjcaskey' }}
+          DOCKERHUB_TOKEN: ${{ secrets.ZCCUSAN_DOCKERHUB_PAT || secrets.DOCKERHUB_PAT || secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          : "${DOCKERHUB_USERNAME:?Docker Hub username is required}"
+          : "${DOCKERHUB_TOKEN:?Docker Hub token is required}"
+          echo "::add-mask::${DOCKERHUB_TOKEN}"
+
+          delay=5
+          for attempt in 1 2 3 4 5; do
+            if printf '%s' "${DOCKERHUB_TOKEN}" | timeout 30s docker login docker.io \
+              --username "${DOCKERHUB_USERNAME}" --password-stdin; then
+              exit 0
+            fi
+            if [ "${attempt}" -eq 5 ]; then
+              echo "::error::Docker Hub login failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "::warning::Docker Hub login attempt ${attempt} failed; retrying in ${delay}s"
+            sleep "${delay}"
+            delay=$((delay * 2))
+          done
+      - name: Compute architecture tags
+        id: arch_tags
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=()
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          for tag in "${tags[@]}"; do output+=("docker.io/robjcaskey/zcblock-csi:${tag}-${ARCH}"); done
+          echo "tags=$(IFS=,; echo "${output[*]}")" >> "$GITHUB_OUTPUT"
+      - name: Build and push architecture image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: zccusan/deploy/zcblock-csi/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.arch_tags.outputs.tags }}
+          build-args: |
+            IMAGE_VARIANT=nonfips
+            KMOD_BUNDLE_ROOT=dist/zccusan-daemonset-kmods
+          labels: |
+            org.opencontainers.image.title=zcblock-csi
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
+          provenance: false
+          sbom: false
+      - name: Smoke-test native architecture and RDMA providers
+        env:
+          IMAGE_TAGS: ${{ steps.arch_tags.outputs.tags }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE_TAGS%%,*}"
+          docker pull "${image}"
+          actual_arch="$(docker image inspect --format '{{.Architecture}}' "${image}")"
+          [ "${actual_arch}" = "${EXPECTED_ARCH}" ]
+          provider_list="$(docker run --rm --entrypoint /usr/bin/fi_info "${image}" -l)"
+          grep -q '^efa:' <<<"${provider_list}"
+          grep -q '^verbs:' <<<"${provider_list}"
+          docker run --rm --entrypoint /usr/local/bin/zcblock-node-setup \
+            "${image}" --help | grep -q 'setup.*zcnblk client-edge module'
+          container_id="$(docker create "${image}")"
+          trap 'docker rm -f "${container_id}" >/dev/null 2>&1 || true' EXIT
+          docker cp "${container_id}:/opt/zcutils/kmods/index.json" kmod-index.json
+          expected_modules="$(jq --arg architecture "${EXPECTED_ARCH}" \
+            '[.targets[] | select(.architecture == $architecture)] | length' \
+            kmods/matrix/targets.json)"
+          actual_modules="$(jq '.modules | length' kmod-index.json)"
+          [ "${actual_modules}" -eq "${expected_modules}" ]
+          [ "$(jq -r '.architecture' kmod-index.json)" = "${EXPECTED_ARCH}" ]
+          set +e
+          preflight="$(docker run --rm --entrypoint /usr/local/bin/zcutils \
+            "${image}" rdma-preflight verbs 2>&1)"
+          preflight_status=$?
+          set -e
+          [ "${preflight_status}" -ne 0 ]
+          grep -q 'no TCP fallback was selected' <<<"${preflight}"
+          printf 'ZCCUSAN_IMAGE_NATIVE_SMOKE_PASS arch=%s kmods=%s providers=efa,verbs rdma_without_device=fail-closed\n' \
+            "${actual_arch}" "${actual_modules}"
+      - name: Install Syft for image attestations
+        if: github.ref == 'refs/heads/main' && needs.prepare.outputs.source_sha == github.sha
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: Install Cosign for image attestations
+        if: github.ref == 'refs/heads/main' && needs.prepare.outputs.source_sha == github.sha
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+      - name: Assume the dedicated attestation signer role
+        if: github.ref == 'refs/heads/main' && needs.prepare.outputs.source_sha == github.sha
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ vars.AWS_ATTESTATION_SIGNER_ROLE_ARN }}
+          aws-region: us-east-1
+          allowed-account-ids: '968134102381'
+          role-session-name: zcutils-attest-${{ github.run_id }}-${{ matrix.arch }}
+          role-duration-seconds: 900
+      - name: Generate and verify signed SPDX and CycloneDX attestations
+        if: github.ref == 'refs/heads/main' && needs.prepare.outputs.source_sha == github.sha
+        env:
+          IMAGE_TAGS: ${{ steps.arch_tags.outputs.tags }}
+          ATTESTATION_DIR: ${{ runner.temp }}/image-attestations/${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE_TAGS%%,*}"
+          python3 scripts/zc-image-attest.py generate \
+            --skip-build \
+            --variant nonfips \
+            --image "${image}" \
+            --output-dir "${ATTESTATION_DIR}" \
+            --kms-key-parameter
+      - name: Upload signed image attestations
+        if: github.ref == 'refs/heads/main' && needs.prepare.outputs.source_sha == github.sha
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zcblock-csi-${{ matrix.arch }}-sbom-attestations-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-attestations/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Log out of Docker Hub
+        if: always()
+        run: docker logout docker.io || true
+
+  chart-matrix:
+    name: Render Helm transport/architecture matrix
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@v4
+      - name: Check amd64/arm64 and TCP/RDMA DaemonSets
+        run: scripts/zccusan-helm-install-matrix.sh
+
+  publish-manifests:
+    name: Publish and sign multi-architecture manifests
+    needs: [prepare, build, chart-matrix]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to Docker Hub with bounded retries
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'robjcaskey' }}
+          DOCKERHUB_TOKEN: ${{ secrets.ZCCUSAN_DOCKERHUB_PAT || secrets.DOCKERHUB_PAT || secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          : "${DOCKERHUB_USERNAME:?Docker Hub username is required}"
+          : "${DOCKERHUB_TOKEN:?Docker Hub token is required}"
+          echo "::add-mask::${DOCKERHUB_TOKEN}"
+
+          delay=5
+          for attempt in 1 2 3 4 5; do
+            if printf '%s' "${DOCKERHUB_TOKEN}" | timeout 30s docker login docker.io \
+              --username "${DOCKERHUB_USERNAME}" --password-stdin; then
+              exit 0
+            fi
+            if [ "${attempt}" -eq 5 ]; then
+              echo "::error::Docker Hub login failed after ${attempt} attempts"
+              exit 1
+            fi
+            echo "::warning::Docker Hub login attempt ${attempt} failed; retrying in ${delay}s"
+            sleep "${delay}"
+            delay=$((delay * 2))
+          done
+      - name: Publish multi-architecture manifests
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          for tag in "${tags[@]}"; do
+            image="docker.io/robjcaskey/zcblock-csi:${tag}"
+            docker buildx imagetools create --tag "${image}" "${image}-amd64" "${image}-arm64"
+          done
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.5.3'
+      - name: Sign published manifests
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+          RELEASE: ${{ needs.prepare.outputs.release }}
+          SECONDARY_SIGN_KEY: ${{ secrets.ZCCUSAN_COSIGN_RELEASE_PRIVATE_KEY }}
+          SECONDARY_SIGN_PASSWORD: ${{ secrets.ZCCUSAN_COSIGN_RELEASE_PRIVATE_KEY_PASSWORD }}
+          COSIGN_EXPERIMENTAL: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          for tag in "${tags[@]}"; do cosign sign --yes "docker.io/robjcaskey/zcblock-csi:${tag}"; done
+          if [ "${RELEASE}" != true ] || [ -z "${SECONDARY_SIGN_KEY}" ]; then exit 0; fi
+          key_path="$(mktemp)"
+          trap 'rm -f "${key_path}"' EXIT
+          printf '%s' "${SECONDARY_SIGN_KEY}" > "${key_path}"
+          export COSIGN_PASSWORD="${SECONDARY_SIGN_PASSWORD}"
+          for tag in "${tags[@]}"; do cosign sign --yes --key "${key_path}" "docker.io/robjcaskey/zcblock-csi:${tag}"; done
+      - name: Print manifests
+        env:
+          TAGS: ${{ needs.prepare.outputs.tags }}
+        shell: bash
+        run: |
+          IFS=',' read -r -a tags <<< "${TAGS}"
+          for tag in "${tags[@]}"; do docker buildx imagetools inspect "docker.io/robjcaskey/zcblock-csi:${tag}"; done
+      - name: Log out of Docker Hub
+        if: always()
+        run: docker logout docker.io || true

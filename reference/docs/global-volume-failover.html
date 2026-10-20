@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Global volume failover · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="global-volume-failover">Global volume failover</h1>
+<p>This design moves volume custody between regions without making Kubernetes the
+source of truth. Kubernetes is one workload adapter; raw block clients,
+userspace clients, VMs, and other orchestrators consume the same committed
+global operation.</p>
+<h2 id="data-topology">Data topology</h2>
+<p>The regional correctness topology is:</p>
+<pre><code class="language-text">/dev/zcnblk0 client edge
+  -&gt; userspace WAL failover stage
+  -&gt; userspace regional HA route (two already-connected frontends)
+  -&gt; userspace regional quorum frontend A or B
+  -&gt; three independent userspace terminal leaf writers (matching 2-of-3)
+  -&gt; terminal block media
+</code></pre>
+<p>Placement, replication, quorum, lane selection, failover, and backpressure are
+owned in userspace. <code>/dev/zcnblk0</code> is only the client edge. No block device,
+device mapper target, loop device, or kernel client performs mirroring or
+striping. A terminal block device appears only behind its leaf writer after
+userspace placement has been decided.</p>
+<p>Each tested data region has three durable replicas in three failure domains,
+requires two matching completions, and exposes two frontends on separate VMs.
+The QEMU fault matrix independently removes storage VM A, B, and C in both
+regions. A and B each contain a frontend and leaf; C contains the third leaf.
+The A and B cases force the open client session to change frontend, while all
+three cases continue on the other two leaves without reconnecting.</p>
+<p>QEMU uses isolated TAP interfaces connected to Linux bridges. Storage and
+control traffic inside the guests is unicast TCP. There is no multicast
+product dependency, and multicast is not an RDMA substitute. These tests do
+not claim RDMA behavior or performance.</p>
+<h2 id="committed-api">Committed API</h2>
+<p><code>GlobalFailoverCommand</code> is the platform-neutral mutation API committed through
+the low-rate global Raft log:</p>
+<ul>
+<li><code>put_volume</code> declares custody, placement epoch, and workload bindings.</li>
+<li><code>put_consistency_set</code> atomically assigns volumes and a quiesce dependency DAG.</li>
+<li><code>observe_region</code> records revision/epoch-bound durable and applied lane HWMs,
+reachability, quiescence, replica count, quorum, and failure domains.</li>
+<li><code>publish_checkpoint</code> records an immutable application-consistent vector cut.</li>
+<li><code>register_session</code> records the placement epoch seen by a client frontend and
+whether it can transparently rebind a clean cut.</li>
+<li><code>request_failover</code> creates an idempotent clean or explicit-loss operation.</li>
+<li><code>reconcile</code> advances only as far as committed observations permit.</li>
+<li><code>acknowledge_workload_action</code> records adapter completion.</li>
+</ul>
+<p>Configuration mutations use compare-and-swap revisions. Observations must name
+the exact committed revision and placement epoch used by the decision. Durable
+and applied HWM maps must name the same lanes, applied cannot exceed durable,
+and the target must report three replicas, a majority quorum of at least two,
+enough live replicas, and three distinct durable failure domains. Drift is
+reported rather than silently adopted.</p>
+<p>The global controller is three full Raft replicas in three control regions.
+Any one control-region loss leaves two full state copies and permits failover;
+loss of quorum expires the short authority lease and rejects mutations. Volume
+data and encryption keys are not stored in this Raft log.</p>
+<h2 id="consistency-sets">Consistency sets</h2>
+<p>A volume may belong to only one atomic consistency set. Updating a set after it
+has a checkpoint or failover requires a new set version. Dependencies form a
+directed acyclic graph; unknown endpoints, self-edges, duplicate edges, cycles,
+and overlapping atomic membership are rejected before an operation exists.</p>
+<p>For Kafka -&gt; PostgreSQL -&gt; Cassandra, quiesce order is Kafka, PostgreSQL,
+Cassandra and resume order is the reverse. A checkpoint covers every member
+and every lane. The selected rollback point is the highest-sequence
+application-consistent checkpoint whose complete vector is durable in the
+target. A clean cut additionally requires the vector to equal every quiesced
+source HWM. This prevents independently choosing three locally recent but
+mutually inconsistent cuts.</p>
+<h2 id="clean-lifecycle">Clean lifecycle</h2>
+<ol>
+<li>Expand any requested member to its complete atomic consistency set.</li>
+<li>Validate fresh source observations and a fully HA target.</li>
+<li>Quiesce applications in deterministic dependency order.</li>
+<li>Wait for a common application-consistent checkpoint that exactly equals the
+quiesced source cut and is durable at the target.</li>
+<li>Transparently rebind capable live sessions to the next placement epoch;
+fence legacy sessions that cannot perform an atomic redirect.</li>
+<li>Commit target custody and the new epoch.</li>
+<li>Emit typed workload actions and wait for adapter acknowledgements.</li>
+<li>Resume in reverse dependency order and complete.</li>
+</ol>
+<p>A <code>Stay</code> workload keeps its source replicas. The tested stay pod retains its
+UID, node, process, and open block FD while the userspace data stage redirects
+the volume. <code>FollowVolume</code> adds a source custody <code>NoSchedule</code> taint, scales the
+source ReplicaSet to zero, removes the target custody taint, and scales the
+target ReplicaSet up. <code>ObserveOnly</code> changes no workload state.</p>
+<h2 id="declared-loss-lifecycle">Declared-loss lifecycle</h2>
+<p>Declared loss is never inferred from a timeout. An authorized request must name
+the reason and maximum acceptable missing operations per lane. Reconciliation
+requires every source observation to be unreachable and the destination to be
+HA with a complete application-consistent checkpoint. It then records, per
+volume and lane:</p>
+<ul>
+<li>the last known durable source HWM;</li>
+<li>the accepted target HWM;</li>
+<li>the inclusive first and last missing sequence.</li>
+</ul>
+<p>If any gap exceeds the declared limit, promotion is rejected. Otherwise all
+old sessions are fenced—even frontends capable of clean transparent rebind—so
+clients cannot continue from state that included now-abandoned writes. The
+placement epoch advances, custody moves, and workload actions carry the
+committed <code>source_region_lost=true</code> bit. Only that bit permits the Kubernetes
+adapter to force-remove a stale source pod API object.</p>
+<h2 id="kubernetes-adapter">Kubernetes adapter</h2>
+<p>The adapter supports Deployments, StatefulSets, and ReplicaSets selected by a
+binding label and region label. It implements custody taints, source scale-down,
+termination waiting, target untainting, target scale-up, and a typed
+acknowledgement. The API owns custody and loss acceptance; the adapter cannot
+promote a volume or declare a region lost by itself.</p>
+<h2 id="verification">Verification</h2>
+<p>Run the complete sequential matrix with:</p>
+<pre><code class="language-console">scripts/zcglobal-failover-qemu-matrix.sh
+</code></pre>
+<p>It runs Rust invariants, a three-control-region Raft fault test, clean nine-VM
+regional HA tests for every A/B/C storage role, a declared-loss nine-VM
+regional test, and clean and declared-loss three-VM Kubernetes tests. It
+rejects active failover harnesses that use a multicast QEMU backend and emits
+one final <code>ZCGLOBAL_FAILOVER_QEMU_COMPLETE_PASS</code> marker only after checking the
+detailed evidence.</p>
+<p>These are correctness tests on a shared host, not representative IOPS or
+latency benchmarks. Their topology logs explicitly report lane/worker mapping,
+aggregate depth, missing huge-page or memlock preconditions, and the absence of
+a measured transport RTT rather than presenting misleading performance data.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#data-topology">Data topology</a><a href="#committed-api">Committed API</a><a href="#consistency-sets">Consistency sets</a><a href="#clean-lifecycle">Clean lifecycle</a><a href="#declared-loss-lifecycle">Declared-loss lifecycle</a><a href="#kubernetes-adapter">Kubernetes adapter</a><a href="#verification">Verification</a></nav></div></body></html>

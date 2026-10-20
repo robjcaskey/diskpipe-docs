@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>zcutils · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zcutils">zcutils</h1>
+<p><a href="https://github.com/robjcaskey/zcutils/actions/workflows/fips-acceptance-tests.yml"><img src="https://github.com/robjcaskey/zcutils/actions/workflows/fips-acceptance-tests.yml/badge.svg?branch=main" alt="FIPS gate tests" /></a>
+<a href="https://github.com/robjcaskey/zcutils/actions/workflows/zcblock-csi-images.yml"><img src="https://github.com/robjcaskey/zcutils/actions/workflows/zcblock-csi-images.yml/badge.svg?branch=main" alt="Image build" /></a>
+<a href="../deploy/zcblock-csi/fips/reproduced/75c89bd43418/README.html"><img src="https://img.shields.io/badge/reproducible%20build-verified%20%4075c89bd4-brightgreen" alt="Reproducible build: verified at 75c89bd4" /></a>
+<a href="../deploy/zcblock-csi/fips/reproduced/75c89bd43418/README.html"><img src="https://img.shields.io/badge/offline%20build-verified%20%4075c89bd4-brightgreen" alt="Offline build: verified at 75c89bd4" /></a>
+<a href="https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314"><img src="https://img.shields.io/badge/FIPS%20CMVP-5314-blue" alt="FIPS CMVP: 5314" /></a>
+<a href="../deploy/zcblock-csi/IMAGE-VALIDATION.html"><img src="https://img.shields.io/badge/SPDX-signed-blue" alt="SPDX: signed" /></a>
+<a href="../deploy/zcblock-csi/IMAGE-VALIDATION.html"><img src="https://img.shields.io/badge/CycloneDX-signed-blue" alt="CycloneDX: signed" /></a>
+<a href="../reference/LICENSE.html"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0%20OR%20BSD--2--Clause-blue" alt="License: MIT or Apache-2.0 or BSD-2-Clause" /></a></p>
+<p>The FIPS gate-test badge reports checker regressions. CMVP #5314 applies to the
+cryptographic module; zccusan application and deployment conformance remain
+under review. The reproducible-build and offline-build badges cover compilation
+and the unsigned executable bundle at the named revision, with a signed
+project-run comparison across two workers. They do not cover the entire OCI
+image, online input preparation and signing, later revisions, or independent
+certification. The SBOM badges link to signature verification instructions for
+the exact image being deployed.</p>
+<p><code>zcutils</code> is an experimental Linux utility crate for zero-copy descriptor
+streams, lane-multiplexed TCP transfer, and low-level io_uring storage/network
+benchmarks. It builds one umbrella binary plus direct command binaries for the
+main pipeline tools.</p>
+<p>Looking for Diskpipe? Visit the <a href="https://diskpipe.com/">Diskpipe documentation</a>
+for deployment <a href="../kubernetes.html">with Kubernetes</a> or
+<a href="../standalone.html">without Kubernetes</a>. The
+<a href="../universe.html">Zero Copy Cinematic Universe</a> explains the project relationships.</p>
+<h2 id="status">Status</h2>
+<p>The current release is <code>1.0.0</code>. This repository declares descriptor protocol
+version 1 as the initial descriptor stream format. Descriptor-native transport
+is specified in <code>docs/zero-copy-descriptor.md</code>, but the local pipeline tools
+still use byte-compatible stdin/stdout paths until Unix socket fd passing,
+credits, and release accounting are implemented. The TCP mux transfer path and
+AES-256-GCM frame format are implemented today.</p>
+<h2 id="build">Build</h2>
+<pre><code class="language-bash">cargo build --release --bins
+</code></pre>
+<p>Both invocation styles are supported:</p>
+<pre><code class="language-bash">zcutils zcprobe
+zcprobe
+zcutils zc-tcpmux-xfer ./file nodeB:/tmp/file
+zc-tcpmux-xfer ./file nodeB:/tmp/file
+</code></pre>
+<h2 id="main-commands">Main Commands</h2>
+<ul>
+<li><code>zcprobe</code>: inspect io_uring, ZCRX, send-zc, NAPI, and io-slot capabilities.</li>
+<li><code>zc-tcpmux-xfer</code>: coordinate a remote receiver over SSH, then transfer bytes
+over TCP data sockets.</li>
+<li><code>zc-tcpmux-send</code> and <code>zc-tcpmux-receive</code>: direct token-authenticated TCP mux
+sender and receiver primitives.</li>
+<li><code>zcencrypt</code> and <code>zcdecrypt</code>: AES-256-GCM framed stream filters.</li>
+<li><code>zcplan</code>: topology-aware descriptor planner for local capability JSON and
+compiled lane/CPU/NIC/WAL/branch/zipper plans.</li>
+<li><code>zcflow</code>: descriptor-aware pipeline runner; byte pipes today.</li>
+<li><code>zccat</code>, <code>zcout</code>, <code>zcmap</code>, <code>zcmaptee</code>, <code>zctee</code>, <code>zctier</code>, <code>zcsink</code>, <code>zcstat</code>,
+<code>zcmeter</code>, and <code>zcgrep</code>: byte-compatible forms of the planned descriptor
+pipeline tools.</li>
+<li><code>zcsnap</code>: descriptor/WAL snapshot cut marker; byte-compatible manifest
+emission today.</li>
+<li><code>zcmux</code>, <code>zcdemux</code>, and <code>zcnc</code>: lane-multiplexed TCP and netcat-like
+network experiments.</li>
+<li><code>zcraid-split</code>, <code>zcraid-merge</code>, and <code>zctier</code>: userspace RAID/fanout,
+reassembly, hot-tier, and bounded spill building blocks.</li>
+<li><code>/dev/zcnblk0</code>: the client-side block onramp to the SAN fabric. It is backed
+by the <code>zcnblk</code> wire protocol today, but the block device users point fio,
+databases, and filesystems at is <code>/dev/zcnblk0</code>.</li>
+<li><code>zcnblk-fan</code>: ordered userspace read/write fan target between <code>/dev/zcnblk0</code>
+or <code>zcnblk-send</code> and leaf <code>zcnblk-target</code> services. It owns stripe placement,
+splits requests at leaf switch points, and preserves same-sector ordering
+without using block devices as RAID primitives.</li>
+<li><code>zcbrd</code>: optional RAM-backed block media for targets and tests. Mid-tree
+fanout, fanin, forwarding, RAID0/RAID1 policy, tier routing, tier spill
+decisions, and backpressure stay in userspace. Block is only the client
+onramp or the last hop where a userspace target finally lands bytes.</li>
+<li><code>zcwritebench</code> and the umbrella-only benchmark subcommands such as
+<code>slot-wal-bench</code>, <code>slot-rand-bench</code>, <code>slot-rand-sharded-bench</code>,
+<code>zckv-page-bench</code>, and <code>zckv-compact-bench</code>: low-level io_uring and storage
+benchmark helpers.</li>
+</ul>
+<h2 id="examples">Examples</h2>
+<p>Run a local byte-compatible smoke test:</p>
+<pre><code class="language-bash">printf 'hello\n' | zcmap | zcsink --consume checksum
+</code></pre>
+<p>Transfer a file to a remote host:</p>
+<pre><code class="language-bash">zc-tcpmux-xfer ./payload.bin nodeB:/tmp/payload.bin
+</code></pre>
+<p>Pin TCP mux lanes to a CPU list on both sides:</p>
+<pre><code class="language-bash">zc-tcpmux-xfer ./payload.bin nodeB:/dev/null \
+  --lanes 128 \
+  --pin-cpus \
+  --cpu-list 0-95
+</code></pre>
+<h2 id="descriptor-spec-and-upgrade-path">Descriptor Spec and Upgrade Path</h2>
+<p>The descriptor stream spec is versioned separately from the crate. This
+repository declares the initial descriptor protocol as protocol version 1,
+carried by a fixed <code>ZcStreamHeader</code> with <code>protocol_version</code>,
+<code>min_reader_version</code>, feature flags, and <code>header_len</code>. Compatible additions
+append length-delimited fields or frames and use optional feature bits.
+Incompatible wire changes must bump <code>protocol_version</code>, set
+<code>min_reader_version</code> to the oldest safe reader, and keep old readers from
+silently accepting streams they cannot interpret.</p>
+<p>The implemented TCP mux lane header is currently V2. Receivers still accept the
+legacy V1 lane header, and V2-compatible extensions can append bytes behind the
+declared body length. See <code>docs/zero-copy-descriptor.md</code> for the exact stream,
+frame, and topology-header rules.</p>
+<h2 id="documentation">Documentation</h2>
+<p>For the smallest complete sample of the repo's intended style, start with
+<code>zc-tcpmux-send</code> and <code>zc-tcpmux-receive</code>: token-authenticated transport,
+lane-aware TCP muxing, AES framing, clear CLI shape, and direct command binaries
+without dragging in the SAN stack.</p>
+<ul>
+<li><code>docs/zero-copy-descriptor.md</code>: descriptor, collection, list, lease, and
+protocol upgrade model.</li>
+<li><code>docs/faq.md</code>: terminology and design notes, starting with what zcutils
+means by lanes.</li>
+<li><code>docs/wal-extent-framing.md</code>: lane-preserving WAL extent framing for logical
+4K records over coalesced physical appends.</li>
+<li><code>docs/zcnblk-wal-fan-topology.md</code>: four-host zcnblk fan topology and the WAL
+visibility contract for ordered fanout without block-device RAID primitives.</li>
+<li><code>docs/zcnblk-log-fanout-architecture.md</code>: log-based fanout/fanin design for
+400G-class zcnblk mirror/stripe result-log zipper paths.</li>
+<li><code>docs/racing-highwater-mirror.md</code>: implemented userspace local-plus-remote
+racing durable mirror, copy ledger, recovery contract, and three-VM QEMU
+proof.</li>
+<li><code>docs/topology-aware-zero-copy-planner.md</code>: negotiated descriptor planner for
+deriving lane, CPU, queue, WAL, branch, and zipper topology from workload
+intent instead of per-run manual knobs.</li>
+<li><code>docs/zccu-target-architecture.html</code>: rendered single-page topology for the
+concrete <code>/dev/zcnblk0 -&gt; tcpmux -&gt; zctee -&gt; split tree -&gt; zcbrd</code> layout.</li>
+<li><code>scripts/render-zccu-volume-layout.py</code>: <code>uv</code> Python renderer for that HTML
+topology artifact.</li>
+<li><code>docs/zcutils-commands.md</code>: command design and examples.</li>
+<li><code>src/bin/zc-tcpmux-send.rs</code> and <code>src/bin/zc-tcpmux-receive.rs</code>: the golden
+child sample app pair for stream transport behavior.</li>
+<li><code>docs/block-vs-userspace-bench-plan.md</code>: benchmark plan and short recipes
+for comparing <code>/dev/zcnblk0</code>, the zcnblk wire path, TCP userspace, and zcraid
+logical paths.</li>
+<li><code>docs/zcnblk-zcbrd-high-iops-getting-started.md</code>: cross-machine high-IOPS
+<code>/dev/zcnblk0 -&gt; zcnblk-target -&gt; /dev/zcbrd0</code> getting-started recipe with
+explicit lane, CPU, and queue mapping.</li>
+<li><code>docs/man/zcutils.1.md</code>: man-page style command reference.</li>
+<li><code>docs/nvme-slot-topology-todo.md</code>: storage topology notes.</li>
+<li><code>docs/image-sbom-attestations.md</code>: local Docker/Podman workflow for
+digest-bound SPDX and CycloneDX SBOM attestations for non-FIPS and
+FIPS-aspiring zcblock-csi images, including verified digest-pinned BuildKit
+developer caches.</li>
+</ul>
+<h2 id="zccusan-docs">zccusan Docs</h2>
+<p>The SAN/Kubernetes storage-network material lives under <code>zccusan/</code>, separate
+from the main stream and pipeline documentation. Start with
+<code>zccusan/README.md</code>.</p>
+<h2 id="license">License</h2>
+<p><code>zcutils</code> is multi-licensed under your choice of MIT, Apache-2.0, or
+BSD-2-Clause. See <code>LICENSE.md</code>.</p>
+<h2 id="identity-documentation-website">Identity documentation website</h2>
+<p><a href="https://robjcaskey.github.io/zcutils/">Read the published guides</a>.
+GitHub Actions validates and builds the Markdown with a small dependency-free
+Rust renderer, then publishes static HTML to the existing Pages site while
+preserving the Helm chart index and archives. Run
+<code>bash scripts/check-docs-site.sh</code> locally; see <a href="../reference/docs-site/README.html">site build and publishing</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#status">Status</a><a href="#build">Build</a><a href="#main-commands">Main Commands</a><a href="#examples">Examples</a><a href="#descriptor-spec-and-upgrade-path">Descriptor Spec and Upgrade Path</a><a href="#documentation">Documentation</a><a href="#zccusan-docs">zccusan Docs</a><a href="#license">License</a><a href="#identity-documentation-website">Identity documentation website</a></nav></div></body></html>

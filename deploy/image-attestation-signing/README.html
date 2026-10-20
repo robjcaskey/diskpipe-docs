@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Optional build-attestation signing key · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="optional-build-attestation-signing-key">Optional build-attestation signing key</h1>
+<p>Deployed in AWS account <code>968134102381</code>, region <code>us-east-1</code>, on 2026-09-13:</p>
+<ul>
+<li>key <code>arn:aws:kms:us-east-1:968134102381:key/7d835db3-7134-4c20-a471-b4220951730d</code></li>
+<li>alias <code>alias/zcutils-build-attestation-signing-authority-Rob-J-Caskey</code></li>
+<li>SSM reference <code>/zcutils/build-attestation/signing-authority/Rob-J-Caskey/kms-key-arn</code></li>
+<li>signer policy <code>arn:aws:iam::968134102381:policy/zcutils-build-attestation-signer-Rob-J-Caskey</code></li>
+<li>GitHub signer role <code>arn:aws:iam::968134102381:role/zcutils-build-attestation-signer-Rob-J-Caskey</code></li>
+</ul>
+<p>The signer policy is attached only to the dedicated GitHub OIDC role. Its trust
+policy accepts the exact <code>repo:robjcaskey/zcutils:ref:refs/heads/main</code> subject;
+it is separate from the EC2 runner controller.</p>
+<p>This isolated Terraform module defines one asymmetric AWS KMS <code>SIGN_VERIFY</code>
+key whose signing authority is exactly <code>Rob J. Caskey</code>, its stable alias
+<code>alias/zcutils-build-attestation-signing-authority-Rob-J-Caskey</code>, and the
+standard SSM <code>String</code>
+<code>/zcutils/build-attestation/signing-authority/Rob-J-Caskey/kms-key-arn</code> whose
+value is only the key ARN. KMS performs signatures internally: this module
+does not create, export, or escrow private key material.</p>
+<p>The module also creates an IAM signer policy restricted to
+<code>ssm:GetParameter</code> on that exact reference and <code>kms:DescribeKey</code>,
+<code>kms:GetPublicKey</code>, <code>kms:Sign</code>, and <code>kms:Verify</code> on that exact key. The verify
+grant supports cosign verification when the independently trusted identity is
+an <code>awskms://</code> URI. Attach the
+The policy is attached only to the dedicated <code>github_signer_role_arn</code>. The
+<code>signer_policy_json</code> output supports independent policy review.</p>
+<p>Do not apply the module merely to test it. <code>prevent_destroy</code> protects both the
+key and reference. A KMS key managed by the organization incurs a recurring
+monthly charge plus signing requests; standard SSM parameters have no additional
+storage charge at standard throughput. Review current AWS pricing before
+changing this deployment.</p>
+<p>Review a plan without saving it to the repository:</p>
+<pre><code class="language-sh">terraform init
+terraform plan -var aws_account_id=968134102381
+</code></pre>
+<p>After an approved deployment and role attachment, the build wrapper resolves
+the key ARN without printing it:</p>
+<pre><code class="language-sh">scripts/zc-image-attest.py generate --skip-build \
+  --variant nonfips --image localhost/zcblock-csi:attested \
+  --aws-profile slopmud-cicd --kms-key-parameter
+</code></pre>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

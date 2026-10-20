@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>zccusan chaos toolbox · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zccusan-chaos-toolbox">zccusan chaos toolbox</h1>
+<p>This optional chart installs bounded, cloud-neutral Linux fault primitives. It
+is intentionally separate from the zccusan CSI chart and receives no
+Kubernetes API credentials. A test harness chooses a fault and checks the
+workload; the toolbox only performs that fault.</p>
+<p>The default chart can terminate an exact PID or executable and temporarily
+blackhole an exact TCP/UDP peer and port. It schedules only on nodes explicitly
+labeled <code>chaos.zcutils.io/allowed=true</code>. Node shutdown is off by default and
+requires both <code>faults.nodePoweroff.enabled=true</code> and
+<code>faults.nodePoweroff.acknowledgeRisk=true</code>.</p>
+<pre><code class="language-bash">kubectl label node some-test-node chaos.zcutils.io/allowed=true
+helm install zccusan-chaos \
+  oci://registry-1.docker.io/robjcaskey/zccusan-chaos-toolbox \
+  --version 0.1.0 --namespace zccusan-chaos --create-namespace
+</code></pre>
+<p>The <a href="../../docs/VALIDATING_SINGLE_REGION_HA_ON_KUBERNETES.html">single-region reliability guide</a>
+uses this chart and keeps the fault commands out of the happy-path storage
+installation.</p>
+<p>Every process fault accepts an exact PID, executable basename, or full
+Kubernetes container ID from its cgroup. Broad executable matches are refused
+unless <code>--all</code> is explicit. Every network fault requires a reusable experiment
+ID, an exact port, a duration of at most one hour, and optionally an exact peer
+IP. The tool removes its nftables table when the duration ends or it receives
+SIGTERM/SIGINT. After an uncatchable container or node loss, remove a remaining
+table explicitly with:</p>
+<pre><code class="language-bash">zccusan-chaos-toolbox network-restore --experiment EXPERIMENT_ID
+</code></pre>
+<p>This chart is for disposable reliability tests. Remove the opt-in node label
+and uninstall the chart when the test is finished.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

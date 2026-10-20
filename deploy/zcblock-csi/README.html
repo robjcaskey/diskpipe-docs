@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>zcblock CSI Driver · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zcblock-csi-driver">zcblock CSI Driver</h1>
+<p>See <a href="../../deploy/zcblock-csi/IMAGE-VALIDATION.html">image validation</a> for public-key verification, Kubernetes admission, and independent rebuild checks.</p>
+<p>This deploys the Rust <code>zcblock-csi</code> binary as a privileged CSI node plugin for a
+local Kubernetes node. It can provision RAM-backed <code>zcbrd</code> devices, sparse
+file-backed loop devices, guarded raw block devices, and full-image CSI
+snapshots.</p>
+<p>Architecturally this is <code>zccsi</code>, a convenience zccusan adapter. <code>zccusan</code> means
+Zero Copy Cinematic Universe Storage Area Network. The chain is descriptor
+primitives -&gt; zero-copy streams -&gt; zero-copy WALs, including WALs of WALs -&gt;
+<code>zcvolume</code> -&gt; <code>zcsan</code> -&gt; convenience <code>zccsi</code>. CSI is just one client of that
+storage network; the zccusan control protocol and local agent own snapshots,
+streams, freeze barriers, replication policy, topology, and later WAL/gateway
+behavior. See <code>zccusan/docs/zccusan.md</code>.</p>
+<p>Build and load a local image variant, install the snapshot API/controller, and
+apply the driver:</p>
+<pre><code class="language-sh">zccusan/deploy/zcblock-csi/build-load-apply.sh
+</code></pre>
+<p>By default this builds the non-FIPS image (<code>IMAGE_VARIANT=nonfips</code>). For the
+FIPS-aspiring variant (Ubuntu by default; see <a href="../../deploy/zcblock-csi/FIPS.html">FIPS image and QEMU lab</a> for UBI/RHEL scope and prerequisites), set:</p>
+<pre><code class="language-sh">IMAGE_VARIANT=fips-aspiring zccusan/deploy/zcblock-csi/build-load-apply.sh
+</code></pre>
+<p><code>build-load-apply.sh</code> resolves these defaults:</p>
+<pre><code class="language-text">nonfips:        IMAGE_NONFIPS=localhost/zcblock-csi:dev
+fips-aspiring:  IMAGE_FIPS_ASPIRING=localhost/zcblock-csi-fips:dev
+</code></pre>
+<p>You can override either image with <code>IMAGE=&lt;full-tag&gt;</code> and/or <code>DOCKERFILE=&lt;path&gt;</code>.</p>
+<p>To simulate three regions in this same local cluster, install three independent
+CSI identities while sharing the snapshot CRDs/controller:</p>
+<pre><code class="language-sh">zccusan/deploy/zcblock-csi/install-local-regions.sh -a -b -c
+zccusan/deploy/zcblock-csi/test-local-regions-cohesive.sh
+zccusan/deploy/zcblock-csi/test-local-regions-stream-repl.sh
+zccusan/deploy/zcblock-csi/test-local-regions-failover.sh
+</code></pre>
+<p>The failover acceptance test provisions distinct A, B, and C volumes, fences
+all writers, replicates A to B and C, promotes B, then replicates and promotes C.
+It is an asynchronous planned-failover proof, not an automatic or zero-RPO
+promotion claim.</p>
+<p>To exercise a real stair-step version skew in one cluster, select each region's
+image independently:</p>
+<pre><code class="language-sh">BUILD_IMAGE=0 \
+IMAGE_A=docker.io/robjcaskey/zcblock-csi:0.1.4 \
+IMAGE_B=docker.io/robjcaskey/zcblock-csi:0.1.5 \
+IMAGE_C=docker.io/robjcaskey/zcblock-csi:0.1.6 \
+  zccusan/deploy/zcblock-csi/install-local-regions.sh -a -b -c
+</code></pre>
+<p><code>REGION_IMAGES='a=IMAGE b=IMAGE c=IMAGE'</code> supports arbitrary local-region
+names. See the
+<a href="../../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">three-part cross-region getting-started
+series</a>
+for the target continuous-WAL, recovery-preview, automatic failover, and policy
+workflow. The series is explicitly marked as a target-state implementation
+contract where it goes beyond the current checkpoint compatibility path.</p>
+<p>You can run both scripts against the FIPS-aspiring track with:</p>
+<pre><code class="language-sh">IMAGE_VARIANT=fips-aspiring zccusan/deploy/zcblock-csi/install-local-regions.sh -a -b -c
+</code></pre>
+<p>The local region install creates <code>zcblock-csi-a</code>, <code>zcblock-csi-b</code>, and
+<code>zcblock-csi-c</code> namespaces, with driver names <code>io.zcutils.zcblock.a</code>,
+<code>.b</code>, and <code>.c</code>. Real multi-region clusters can keep the default
+<code>io.zcutils.zcblock</code> driver name because each region has its own Kubernetes API
+server. The CRD versioning and stair-step upgrade rule is documented in
+<code>zccusan/deploy/zcblock-csi/CRD-UPGRADES.md</code>.</p>
+<p>The minimal Kubernetes API role is captured in
+<code>zccusan/deploy/zcblock-csi/rbac-minimal.yaml</code>. The Rust CSI/control containers do not
+call the Kubernetes API directly; the ServiceAccount exists for the standard CSI
+sidecars. The minimum cluster-wide permissions cover PV/PVC provisioning,
+events, node/topology reads, storage class/CSINode reads, and snapshot content
+updates. Leader-election leases are intentionally namespace-local through a
+RoleBinding, with the manifests setting
+<code>--leader-election-namespace=$(POD_NAMESPACE)</code> on the sidecars.</p>
+<p>There is also a Helm chart at <code>zccusan/charts/zcblock-csi</code>. Chart rule: no Helm hooks.
+It supports stair-step upgrades with <code>helm template ... | kubectl apply -f -</code>;
+apply and wait for one region's DaemonSet rollout before applying the next
+region. CRD installation and snapshot-controller stair-step upgrades stay
+outside the chart and remain handled by
+<code>zccusan/deploy/zcblock-csi/install-snapshot-api.sh</code>.</p>
+<p>The Helm node loader accepts a module bundled into the normal DaemonSet image,
+from a fleet-managed host path, or from a user-provided static HTTP(S) server.
+Build a local architecture/kernel-specific full DaemonSet image with:</p>
+<pre><code class="language-sh">MODULE_FILE=./zcnblk_client_mod.ko \
+KERNEL_RELEASE="$(uname -r)" \
+IMAGE=localhost/zcblock-csi:custom-kernel \
+  zccusan/deploy/zcblock-csi/build-kmod-image.sh
+</code></pre>
+<p>The script uses Docker or Podman. On-node source compilation is an explicitly
+gated development mode, not a production fallback; see the chart README for
+the corresponding values.</p>
+<p>The CSI container now has a sibling <code>zcblock-control</code> sidecar in the same pod.
+That sidecar is the first local zccusan agent. It exposes the local control
+plane on <code>http://127.0.0.1:9788</code> using the OpenAPI contract in
+<code>src/openapi/zcblock-control.yaml</code> and also serves that contract from
+<code>/openapi.yaml</code>. CSI snapshot create/delete calls use this REST client path; the
+older Unix socket remains available for local compatibility.</p>
+<p>The stream replication test creates a snapshot in region <code>a</code>, starts encrypted
+replication receivers in region <code>b</code> and <code>c</code>, and has region <code>a</code> stream the
+snapshot image into the target volumes. <code>zcrepl csi-recv</code>, <code>zcrepl csi-send</code>,
+and <code>zcrepl csi-status</code> can drive either the REST control URL or the legacy Unix
+socket.</p>
+<p>The concurrent C receive test keeps regions <code>a</code>, <code>b</code>, and <code>c</code> alive, starts two
+receivers on region <code>c</code>, streams a live source volume from <code>a</code> to one C target,
+and simultaneously streams a snapshot from <code>b</code> to another C target:</p>
+<pre><code class="language-sh">zccusan/deploy/zcblock-csi/test-local-regions-concurrent-c-receive.sh
+</code></pre>
+<p>Deploy a smoke-test PVC and pod:</p>
+<pre><code class="language-sh">kubectl apply -f zccusan/deploy/zcblock-csi/example.yaml
+kubectl -n zcblock-demo get pods,pvc
+kubectl get pv
+kubectl delete -f zccusan/deploy/zcblock-csi/example.yaml
+</code></pre>
+<p>The file-backed loop smoke test uses the <code>zcfile</code> StorageClass:</p>
+<pre><code class="language-sh">kubectl apply -f zccusan/deploy/zcblock-csi/example-file-loop.yaml
+kubectl -n zcblock-demo logs zcfile-smoke
+kubectl delete -f zccusan/deploy/zcblock-csi/example-file-loop.yaml
+</code></pre>
+<p>The raw block example uses <code>volumeMode: Block</code> and the <code>zcraw</code> StorageClass.
+It only exposes the allowlisted raw partition as a block device; the CSI driver
+does not format, wipe, or delete it:</p>
+<pre><code class="language-sh">kubectl apply -f zccusan/deploy/zcblock-csi/example-raw-block.yaml
+kubectl -n zcblock-demo logs zcraw-smoke
+kubectl delete -f zccusan/deploy/zcblock-csi/example-raw-block.yaml
+</code></pre>
+<p>The snapshot example creates a file-backed PVC, snapshots it, and restores a
+new file-backed PVC from the snapshot:</p>
+<pre><code class="language-sh">kubectl apply -f zccusan/deploy/zcblock-csi/example-snapshot-source.yaml
+kubectl -n zcblock-demo wait --for=condition=Ready pod/zcfile-snap-writer --timeout=180s
+kubectl apply -f zccusan/deploy/zcblock-csi/example-snapshot.yaml
+kubectl -n zcblock-demo wait --for=jsonpath='{.status.readyToUse}'=true volumesnapshot/zcfile-snap --timeout=300s
+kubectl apply -f zccusan/deploy/zcblock-csi/example-snapshot-restore.yaml
+kubectl -n zcblock-demo wait --for=condition=Ready pod/zcfile-snap-reader --timeout=180s
+kubectl -n zcblock-demo logs zcfile-snap-reader
+kubectl delete -f zccusan/deploy/zcblock-csi/example-snapshot-restore.yaml
+kubectl delete -f zccusan/deploy/zcblock-csi/example-snapshot.yaml
+kubectl delete -f zccusan/deploy/zcblock-csi/example-snapshot-source.yaml
+</code></pre>
+<p>For a cohesive snapshot across regions, run a short-lived barrier against each
+cluster's <code>zcblock-csi</code> node plugin before creating the VolumeSnapshots. The
+barrier freezes staged filesystem volumes with <code>fsfreeze</code> and always auto-thaws
+after the requested TTL, even if the external supervisor stops responding:</p>
+<pre><code class="language-sh">POD="$(kubectl -n zcblock-csi get pod -l app.kubernetes.io/name=zcblock-csi -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n zcblock-csi exec "$POD" -c zcblock-csi -- \
+  zcblock-freeze --control-url http://127.0.0.1:9788 freeze --barrier global-snap-001 --ttl-ms 750
+kubectl -n zcblock-csi exec "$POD" -c zcblock-csi -- \
+  zcblock-freeze --control-url http://127.0.0.1:9788 status
+kubectl -n zcblock-csi exec "$POD" -c zcblock-csi -- \
+  zcblock-freeze --control-url http://127.0.0.1:9788 release --barrier global-snap-001
+</code></pre>
+<p>A supervisor should fan out <code>freeze</code> to every participating cluster, wait for
+all <code>OK</code> responses, create the snapshots, then fan out <code>release</code>. If any region
+does not acknowledge in time, stop the snapshot attempt and let each node's TTL
+expire. The default maximum TTL is 5000 ms and the manifest sets it explicitly
+with <code>--freeze-max-ttl-ms=5000</code>; sub-second values are expected for normal use.</p>
+<p>This barrier only quiesces filesystem-mode PVCs that have been staged by kubelet
+on that node. Block-mode volumes, including <code>backend=raw-block</code>, are not
+filesystem-frozen; they need application-level quiescing or a later block-level
+protocol.</p>
+<p>The <code>zcbrd</code> module must already be loaded and configfs must be mounted on the
+host. The driver does not load kernel modules.</p>
+<p>StorageClass parameters:</p>
+<ul>
+<li><code>backend</code>: <code>zcbrd</code>, <code>file-loop</code>, <code>fabric</code>, <code>userspace-mount</code>, or <code>raw-block</code>. <code>fabric</code> stages
+<code>/dev/zcnblk0</code> without node affinity; every eligible node must have its own
+client edge connected through the separate userspace stage to the requested
+logical volume. CSI and the kernel edge do not own placement. <code>mux</code> remains
+reserved for a later gateway/control plane.</li>
+<li><code>userspace-mount</code> skips the client block device for filesystem-mode PVCs.
+A separate userspace filesystem service must expose a FUSE mount at
+<code>&lt;userspaceMountRoot&gt;/&lt;volume-id&gt;</code> on each eligible node. CSI verifies the
+filesystem type and stages that mount; it rejects <code>volumeMode: Block</code> and
+does not own remote placement.</li>
+<li><code>blocksize</code>: block size written to configfs. Default: <code>4096</code>.</li>
+<li><code>queues</code>: blk-mq queue count. Default: <code>8</code>.</li>
+<li><code>queueDepth</code>: queue depth. Default: <code>512</code>.</li>
+<li><code>descriptorMode</code>: <code>advertise</code> or <code>disabled</code>. Default: <code>advertise</code>.</li>
+<li><code>fileRoot</code>: optional absolute directory for <code>backend=file-loop</code> sparse
+images. Default: <code>/var/lib/zcblock-csi/files</code>.</li>
+<li><code>rawPartUUID</code> or <code>rawDevice</code>: required for <code>backend=raw-block</code>; the matching
+PARTUUID must be listed in <code>/etc/zcblock-csi/allowed-raw-partitions.txt</code>.
+The exact <code>rawDevice=/dev/zcnblk0</code> client edge is also accepted for
+block-mode PVCs; placement remains in its downstream userspace stage.</li>
+</ul>
+<p>Snapshots are stored under <code>/var/lib/zcblock-csi/snapshots</code>. For <code>backend=file-loop</code>,
+the driver uses a reflink/COW PIT snapshot when the state directory filesystem
+supports Linux <code>FICLONE</code>; <code>--snapshot-mode=reflink</code> makes that mandatory, while
+the default <code>--snapshot-mode=auto</code> falls back to a full copy if reflink is not
+available. <code>backend=zcbrd</code> and <code>backend=raw-block</code> still use full byte copies
+until the userspace fabric target can serve COW/WAL PIT views directly.
+Restoring to <code>backend=raw-block</code> writes the snapshot image back to the
+allowlisted raw block device during <code>CreateVolume</code>.</p>
+<p>The zccusan control API separately defines fabric snapshot exports:
+<code>POST /v1/snapshot-devices</code> registers a read-only <code>cow</code> or <code>wal</code> PIT view for
+the userspace fabric target/gateway. There are no separate COW/WAL snapshot
+kernel providers, and it does not fall back to loop devices or writable
+restores. Compaction is tracked through <code>/v1/compactions</code>: the normal strategy
+is <code>stream-rewrite</code>, where a worker streams the old placement off-machine and
+streams the compacted representation back to the new location. Workers
+occasionally register small progress state with <code>PUT /v1/compactions/{jobId}</code>;
+<code>strategy=in-place</code> means a userspace worker compacts the current placement
+locally while reporting the same control-plane state.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

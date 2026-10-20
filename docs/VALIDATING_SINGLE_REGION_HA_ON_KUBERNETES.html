@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Optional next step: validate single-region reliability · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="optional-next-step-validate-single-region-reliability">Optional next step: validate single-region reliability</h1>
+<p>This short exercise keeps writing to the mirrored volume from the getting
+started guide while real failures are introduced. It gives you one clear
+<code>PASS</code> or <code>FAIL</code> result; you do not need to learn zccusan's internal processes
+or ports to run it.</p>
+<p>Use a disposable three-node cluster. The RAM storage from the getting started
+guide is perfect for testing recovery behavior, but it does not retain data
+after a node is powered off. Repeat a production durability test with your own
+dedicated persistent devices.</p>
+<p>This page covers one Kubernetes cluster in one region. Cross-region recovery
+is the <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">next, separate tutorial</a>.</p>
+<h2 id="1-install-the-optional-chaos-toolbox">1. Install the optional chaos toolbox</h2>
+<p>The toolbox is a separate chart and is never installed with the CSI. Label only
+the three disposable nodes used by this example:</p>
+<pre><code class="language-bash">kubectl label node some-node-a chaos.zcutils.io/allowed=true
+kubectl label node some-node-b chaos.zcutils.io/allowed=true
+kubectl label node some-node-c chaos.zcutils.io/allowed=true
+</code></pre>
+<p>Install the pinned chart from Docker Hub:</p>
+<pre><code class="language-bash">helm install zccusan-chaos \
+  oci://registry-1.docker.io/robjcaskey/zccusan-chaos-toolbox \
+  --version 0.1.0 \
+  --namespace zccusan-chaos \
+  --create-namespace
+</code></pre>
+<p>The toolbox has no Kubernetes API credentials. It can affect only opted-in
+nodes, and node poweroff is disabled in this installation.</p>
+<h2 id="2-run-the-check">2. Run the check</h2>
+<p>Finish the main getting started guide through pgbench, then delete pgbench so
+its <code>ReadWriteOnce</code> volume can be mounted by the reliability canary:</p>
+<pre><code class="language-bash">kubectl delete -f mirror-pgbench.yaml --ignore-not-found
+</code></pre>
+<p>Run the check from your <code>zcutils</code> checkout. Repeating the current context in the
+command is an intentional safety confirmation:</p>
+<pre><code class="language-bash">scripts/zccusan-validate-single-region-ha.sh \
+  --confirm-context "$(kubectl config current-context)"
+</code></pre>
+<p>The check takes about a minute. It performs five easy-to-read checks:</p>
+<ol>
+<li>The mirrored-volume canary can write, synchronize, and read back an
+increasing sequence.</li>
+<li>Restarting the zccusan controller does not stop the established data path.</li>
+<li>A host-path control workload proves the process fault really reached the
+selected node.</li>
+<li>One storage worker is terminated and Kubernetes restarts it.</li>
+<li>One exact storage connection is cut for five seconds and automatically
+restored.</li>
+</ol>
+<p>A healthy run ends like this:</p>
+<pre><code class="language-text">PASS  preflight                volume=... storage_worker=... mirror=...
+PASS  baseline                 sequence 1 -&gt; 2
+PASS  control-restart          sequence 2 -&gt; 3
+PASS  comparator               fault reached host-path-backed control workload
+PASS  storage-process          sequence 3 -&gt; 4
+PASS  network-link             sequence 4 -&gt; 5
+
+RESULT: PASS — every injected fault was observed and the mirrored-volume canary resumed valid commits.
+</code></pre>
+<p>A failed check is useful evidence, not something to waive. The script leaves
+the fault bounded, prints which behavior failed, and removes its two test Pods.
+It does not delete your mirrored PVC.</p>
+<h2 id="optional-power-off-a-disposable-server">Optional: power off a disposable server</h2>
+<p>Process and link loss are the safe first test. A real node shutdown is more
+disruptive, so it has two additional opt-ins and requires the node name to be
+repeated exactly. If you intend to continue to this step, rerun the validation
+with <code>--keep-test-pods</code>, then enable this test only when losing one example
+server is safe:</p>
+<pre><code class="language-bash">helm upgrade zccusan-chaos \
+  oci://registry-1.docker.io/robjcaskey/zccusan-chaos-toolbox \
+  --version 0.1.0 \
+  --namespace zccusan-chaos \
+  --reuse-values \
+  --set faults.nodePoweroff.enabled=true \
+  --set faults.nodePoweroff.acknowledgeRisk=true
+</code></pre>
+<p>Choose the node hosting the host-path comparator and resolve the toolbox on
+that same node:</p>
+<pre><code class="language-bash">TARGET_NODE="$(kubectl -n zccusan get pod zc-single-region-ha-hostpath \
+  -o jsonpath='{.spec.nodeName}')"
+TOOLBOX="$(kubectl -n zccusan-chaos get pod \
+  -l app.kubernetes.io/name=zccusan-chaos-toolbox \
+  --field-selector "spec.nodeName=${TARGET_NODE}" \
+  -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n zccusan-chaos exec "${TOOLBOX}" -- \
+  zccusan-chaos-toolbox node-poweroff --confirm-node "${TARGET_NODE}"
+</code></pre>
+<p>The command connection should end because that node powered off. The host-path
+control Pod becomes unavailable with its node; the mirrored canary on the
+client node should either continue or visibly fail the reliability claim. Watch
+its strictly increasing committed sequence with:</p>
+<pre><code class="language-bash">kubectl -n zccusan logs --follow zc-single-region-ha-canary
+</code></pre>
+<h2 id="clean-up">Clean up</h2>
+<p>Remove the test workloads, toolbox, and node opt-in labels:</p>
+<pre><code class="language-bash">kubectl -n zccusan delete pod zc-single-region-ha-canary \
+  zc-single-region-ha-hostpath --ignore-not-found
+helm uninstall zccusan-chaos --namespace zccusan-chaos
+kubectl delete namespace zccusan-chaos
+kubectl label node some-node-a chaos.zcutils.io/allowed-
+kubectl label node some-node-b chaos.zcutils.io/allowed-
+kubectl label node some-node-c chaos.zcutils.io/allowed-
+</code></pre>
+<p>Return to the main guide's storage tear-down when you are finished.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-install-the-optional-chaos-toolbox">1. Install the optional chaos toolbox</a><a href="#2-run-the-check">2. Run the check</a><a href="#optional-power-off-a-disposable-server">Optional: power off a disposable server</a><a href="#clean-up">Clean up</a></nav></div></body></html>

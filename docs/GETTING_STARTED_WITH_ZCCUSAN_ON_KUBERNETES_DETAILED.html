@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Getting started 2: explained Kubernetes installation · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="getting-started-2-explained-kubernetes-installation">Getting started 2: explained Kubernetes installation</h1>
+<p>This is the complete walkthrough behind the
+<a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">short happy path</a>. Use
+it when the short path does not work, when the defaults do not describe the
+cluster, or before treating the installation as anything beyond a disposable
+test.</p>
+<h2 id="detailed-walkthrough">Detailed walkthrough</h2>
+<ol>
+<li>
+<p><strong>Experimental:</strong> zccusan is an early-stage project whose installation, kernel module, networking, CPU placement, huge-page allocation, memlock, and storage topology still require careful configuration.</p>
+</li>
+<li>
+<p>Expect to use a capable automation agent to inspect your nodes, adapt these examples, and tune the installation before evaluating performance or safety.</p>
+</li>
+<li>
+<p>In one <a href="../assets/repository/bench-results/zc-current-dualefa-block-20260823T234720Z/client-pull/current-record-12m-gated/summary.log">recorded reference</a>—not a promise—a Linux-block <code>/dev/zcnblk0</code> client averaged 12.32 million 4 KiB remote-read IOPS across three runs on a tuned two-node <code>c8gn.48xlarge</code> configuration with 64 pinned lanes, QD64 per worker, 4,096 aggregate outstanding operations, two EFA devices, EFA-direct RMA, volatile remote memory, and initiator-local CQ data-visible completion.</p>
+</li>
+<li>
+<p>In a separate <a href="../assets/repository/bench-results/zc-zcnblk-c8in96w2c-tcp-arena-write-kickfix-alias-qd128-long-20260822T1900Z/summary.log">recorded reference</a>—not directly comparable—the same block frontend averaged 1.68 million 4 KiB early-local-ack write IOPS across three runs on a tuned two-node <code>c8in.metal-96xl</code> configuration with 32 pinned lanes, QD128 per worker, 4,096 aggregate outstanding operations, two TCP rails, huge-page-backed shared arenas, and volatile remote memory, while remote sync and FUA were outside the timed workload.</p>
+</li>
+<li>
+<p>Those results demonstrate multi-million-IOPS potential but do not predict this one-lane mirrored PVC tutorial, durable media, mixed workloads, fsync latency, smaller machines, different kernels, or an untuned cluster.</p>
+</li>
+<li>
+<p>You need Helm 3, <code>kubectl</code>, three distinct Ready Linux workers, an encrypted pod or physical backplane, and permission to run the chart's privileged node setup and CSI containers.</p>
+</li>
+<li>
+<p>The normal multi-architecture DaemonSet image contains the Rust node loader and the <a href="../reference/docs/kernel-module-build-matrix.html">current audited module matrix</a>; it selects only an exact architecture and full <code>uname -r</code> match and fails closed before CSI startup on an unsupported kernel.</p>
+</li>
+<li>
+<p>Create the namespace explicitly so its ownership and lifecycle are visible.</p>
+<pre><code class="language-bash">kubectl create namespace zccusan
+</code></pre>
+</li>
+<li>
+<p>Choose two example servers and one example client. The RAM <code>MediaGrant</code> uses the server label as its complete placement boundary, while the fio manifest asks Kubernetes for the client label.</p>
+<pre><code class="language-bash">kubectl get nodes
+kubectl label node some-node-a storage.zcutils.io/example-server=true
+kubectl label node some-node-b storage.zcutils.io/example-server=true
+kubectl label node some-node-c storage.zcutils.io/example-client=true
+kubectl get nodes -L \
+  storage.zcutils.io/example-server,storage.zcutils.io/example-client
+</code></pre>
+</li>
+<li>
+<p>If <code>InternalIP</code> is not the dedicated storage address, annotate both example servers with their storage addresses.</p>
+</li>
+</ol>
+<pre><code class="language-bash">kubectl annotate node some-node-a \
+  storage.zcutils.io/backplane-address=10.20.0.11
+kubectl annotate node some-node-b \
+  storage.zcutils.io/backplane-address=10.20.0.12
+</code></pre>
+<ol start="11">
+<li>Leave <code>HELM_ARGS</code> empty for TCP. For EFA-direct on EKS, use EFA-capable nodes configured for EFA traffic, install the pinned AWS EFA device plugin, and verify that all three selected nodes advertise one EFA resource before enabling the strict RDMA capability gate. Other RDMA environments must provide their corresponding device plugin and resource name.</li>
+</ol>
+<pre><code class="language-bash">HELM_ARGS=()
+
+# EKS EFA-direct example; TCP users skip these commands.
+helm repo add aws-eks https://aws.github.io/eks-charts
+helm repo update aws-eks
+helm upgrade --install aws-efa-device-plugin \
+  aws-eks/aws-efa-k8s-device-plugin \
+  --version v0.5.30 --namespace kube-system --wait --timeout 120s
+kubectl get nodes \
+  -o 'custom-columns=NAME:.metadata.name,EFA:.status.allocatable.vpc\.amazonaws\.com/efa'
+
+# HELM_ARGS+=(--set backplane.rdma.enabled=true)
+# HELM_ARGS+=(--set backplane.rdma.provider=efa-direct)
+
+# A custom unsupported kernel can use reviewed host or HTTP module-source
+# values, or a custom full DaemonSet image; the matrix needs no extra values.
+</code></pre>
+<ol start="12">
+<li>Install the CRDs, operator, CSI driver, and Rust node bootstrap in one Helm step; pin <code>image.digest</code> for a reproducible deployment, and provide custom module-source values only when your exact kernel is outside the bundled matrix.</li>
+</ol>
+<pre><code class="language-bash">helm repo add zcutils https://robjcaskey.github.io/zcutils
+helm repo update
+helm upgrade --install zccusan \
+  zcutils/zcblock-csi \
+  --version 0.1.6 \
+  --namespace zccusan \
+  "${HELM_ARGS[@]}" \
+  --wait \
+  --timeout 10m
+</code></pre>
+<ol start="13">
+<li>Wait for the operator and node DaemonSet, then inspect setup logs if <code>/dev/zcnblk0</code> and <code>/dev/zcnblk-shmctl</code> do not appear on eligible client nodes.</li>
+</ol>
+<pre><code class="language-bash">kubectl -n zccusan rollout status \
+  deployment/zccusan-zcblock-csi-operator --timeout=10m
+kubectl -n zccusan rollout status \
+  daemonset/zccusan-zcblock-csi-node --timeout=10m
+kubectl -n zccusan get pods -o wide
+</code></pre>
+<ol start="14">
+<li>Apply the safest first storage declaration: two userspace mirror copies over volatile RAM on nodes selected by the <code>MediaGrant</code>. The operator turns that declaration into the <code>zc-mirror-ram</code> StorageClass. For real media, inspect and render <code>mirror-block.template.yaml</code> only when you intentionally dedicate two empty partitions and approve destructive raw writes.</li>
+</ol>
+<pre><code class="language-bash">kubectl apply -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-ram.yaml
+kubectl get mediagrant getting-started-ram -o yaml
+kubectl get storageprofile getting-started-mirror-ram
+kubectl get storageclass zc-mirror-ram
+</code></pre>
+<ol start="15">
+<li>For a qualified RDMA cluster, review <code>mirror-rdma.template.yaml</code>, set its device-plugin resource and provider for your environment, apply it, and use <code>zc-mirror-rdma-ram</code> instead of <code>zc-mirror-ram</code> below without expecting silent TCP fallback.</li>
+</ol>
+<pre><code class="language-bash">less zccusan/deploy/zcblock-csi/getting-started/mirror-rdma.template.yaml
+kubectl apply -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-rdma.template.yaml
+</code></pre>
+<ol start="16">
+<li>Create the TCP PVC and fio Pod from their standalone files, or substitute the reviewed RDMA StorageClass in the PVC before applying the same workload.</li>
+</ol>
+<pre><code class="language-bash">kubectl apply -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-pvc.yaml
+kubectl apply -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-fio.yaml
+
+# RDMA alternative
+# sed 's/zc-mirror-ram/zc-mirror-rdma-ram/' \
+#   zccusan/deploy/zcblock-csi/getting-started/mirror-pvc.yaml | \
+#   kubectl apply -f -
+# kubectl apply -f \
+#   zccusan/deploy/zcblock-csi/getting-started/mirror-fio.yaml
+</code></pre>
+<ol start="17">
+<li>Follow fio live through the functional 4 KiB <code>randrw</code> run, remembering that this QD16 pod is deliberately not the tuned record configuration described above.</li>
+</ol>
+<pre><code class="language-bash">kubectl -n zccusan logs --follow \
+  --pod-running-timeout=10m \
+  zc-mirror-fio
+</code></pre>
+<ol start="18">
+<li>Verify that both storage-copy Pods run on the example servers, fio runs on the example client, and <code>/dev/zcnblk0</code> remains only the client edge while the userspace mirror owns placement.</li>
+</ol>
+<pre><code class="language-bash">export ZCV="$(kubectl -n zccusan get zcvolumes \
+  -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n zccusan get zcvolume "$ZCV" -o yaml
+kubectl -n zccusan get pods \
+  -l "storage.zcutils.io/volume=$ZCV" -o wide
+kubectl -n zccusan get pod zc-mirror-fio \
+  -o jsonpath='{.spec.nodeName}{"\n"}'
+</code></pre>
+<ol start="19">
+<li>
+<p>Treat RAM media as explicitly volatile, provide transport encryption outside these preview data paths, and create any <code>VolumeSnapshotClass</code> separately because the chart does not create one.</p>
+</li>
+<li>
+<p>Before cleanup, optionally run the <a href="../docs/VALIDATING_SINGLE_REGION_HA_ON_KUBERNETES.html">single-region HA boundary validation</a>. It keeps a synchronized canary on the volume while you restart components, transfer custody at the userspace mirror's replicated HWM, and cause storage-copy failures. The exercise uses the continuous raw WAL path rather than moving a one-time snapshot and identifies the automatic failover and repair behavior that the current preview does not yet implement.</p>
+</li>
+<li>
+<p>Remove the test pod and PVC when finished so CSI can delete the <code>ZcVolume</code> after the operator tears down its userspace runtime.</p>
+</li>
+</ol>
+<pre><code class="language-bash">kubectl delete -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-fio.yaml
+kubectl delete -f \
+  zccusan/deploy/zcblock-csi/getting-started/mirror-pvc.yaml
+</code></pre>
+<ol start="22">
+<li>Continue with <a href="../docs/GETTING_STARTED_WITH_TIERING_ON_KUBERNETES.html">tiering</a>, then begin the three-part <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">cross-region replication and recovery series</a>. Consult the detailed performance documentation before publishing representative claims.</li>
+</ol>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#detailed-walkthrough">Detailed walkthrough</a></nav></div></body></html>

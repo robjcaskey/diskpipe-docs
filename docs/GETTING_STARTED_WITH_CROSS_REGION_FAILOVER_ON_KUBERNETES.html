@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Cross-region getting started 2: automatic failover and failback · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="cross-region-getting-started-2-automatic-failover-and-failback">Cross-region getting started 2: automatic failover and failback</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> this tutorial is an implementation contract.
+Its end-to-end operator workflow is not yet available in the current chart.</p>
+</blockquote>
+<p>This tutorial moves from tutorial one's single-cluster simulation to three
+independent Kubernetes clusters. It adds automatic fenced failover and
+failback, asymmetric regional storage, standby targets that are not permanently
+hot, and performance admission that remains meaningful during recovery.</p>
+<p>For an inexpensive rehearsal, use the three simulated regions from <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">tutorial
+one</a>. You can
+also reuse three clusters prepared with the <a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">regional Kubernetes getting
+started guide</a>; leave its CSI
+installed and use one prepared cluster per region.</p>
+<h2 id="1-install-one-regional-member-in-each-cluster">1. Install one regional member in each cluster</h2>
+<p>This guide calls the kubeconfig contexts <code>region-a</code>, <code>region-b</code>, and <code>region-c</code>.
+Each cluster needs enough independent nodes and media for the durability claim
+it advertises. A smaller functional lab must report the missing failure-domain
+guarantee.</p>
+<pre><code class="language-bash">kubectl --context region-a create namespace zccusan
+kubectl --context region-b create namespace zccusan
+kubectl --context region-c create namespace zccusan
+</code></pre>
+<p>Set <code>ZCCUSAN_VERSION</code> to the release supporting this tutorial, then install A:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-a --namespace zccusan \
+  --set region.id=region-a \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install B:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-b --namespace zccusan \
+  --set region.id=region-b \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>Install C:</p>
+<pre><code class="language-bash">helm upgrade --install zccusan zcutils/zcblock-csi \
+  --version "$ZCCUSAN_VERSION" \
+  --kube-context region-c --namespace zccusan \
+  --set region.id=region-c \
+  --set federation.controlVoter=true \
+  --wait --timeout 120s
+</code></pre>
+<p>The three low-rate voters commit membership, policies, leases, topology epochs,
+and summarized HWMs. Individual I/O and fsync acknowledgements do not traverse
+Raft.</p>
+<h2 id="2-establish-independently-authenticated-membership">2. Establish independently authenticated membership</h2>
+<p>Create the federation in A and consume bounded, one-use invitations in B and C.
+Invitation files contain bootstrap credentials: protect them, never commit
+them, and delete them after use.</p>
+<pre><code class="language-bash">zcctl federation create tutorial-global --context region-a --region region-a
+zcctl federation invite tutorial-global --context region-a \
+  --region region-b --expires 10m --output region-b.invitation
+zcctl federation join --context region-b --invitation region-b.invitation
+zcctl federation invite tutorial-global --context region-a \
+  --region region-c --expires 10m --output region-c.invitation
+zcctl federation join --context region-c --invitation region-c.invitation
+rm region-b.invitation region-c.invitation
+</code></pre>
+<p>The resulting passwordless workload identities and transport credentials
+rotate without repeating bootstrap. Every cross-region segment is untrusted
+and carries encrypted, authenticated payloads.</p>
+<h2 id="3-separate-data-readiness-from-capacity-assurance">3. Separate data readiness from capacity assurance</h2>
+<p>A standby is not simply <code>hot</code> or <code>cold</code>. The scheduler represents four
+independent properties:</p>
+<div class="table-scroll"><table><thead><tr><th>Property</th><th>Examples</th></tr></thead><tbody>
+<tr><td>Data readiness</td><td>WAL only, indexed checkpoint-plus-WAL overlay, materialized, cache warm</td></tr>
+<tr><td>Capacity assurance</td><td>allocated static, reserved autoscaling, reserved manual, best effort</td></tr>
+<tr><td>Activation authority</td><td>automatic controller, external provisioner, human action</td></tr>
+<tr><td>Performance deadline</td><td>minimum usable service and later full service</td></tr>
+</tbody></table>
+</div>
+<p>This prevents a region with safely retained WAL but no running database-sized
+compute pool from being described as either empty or fully ready.</p>
+<p>Use the regional <a href="../docs/GETTING_STARTED_WITH_TIERING_ON_KUBERNETES.html">tiering
+tutorial</a> to create asymmetric
+local profiles. This exercise uses:</p>
+<div class="table-scroll"><table><thead><tr><th>Region</th><th>Data while on standby</th><th>Capacity plan</th></tr></thead><tbody>
+<tr><td>A</td><td>materialized, DRAM hot, userspace mirrored WAL spilling sequentially to fast NVMe</td><td><code>AllocatedStatic</code></td></tr>
+<tr><td>B</td><td>retained object/NVMe WAL plus a continuously maintained sparse overlay index</td><td><code>ReservedAutoscaling</code></td></tr>
+<tr><td>C</td><td>sealed checkpoint and WAL segments in object storage; replay deferred</td><td><code>ReservedManual</code> with best-effort fallbacks</td></tr>
+</tbody></table>
+</div>
+<p>Mirroring, placement, tiering, spill, and backpressure remain userspace stages.
+NVMe is terminal media behind the userspace writer; no block device is used as
+a mirror or stripe primitive.</p>
+<h2 id="4-give-each-deferred-target-an-activation-owner">4. Give each deferred target an activation owner</h2>
+<p>Deferring replay does not leave recovery ownerless. Each destination registers
+a <code>RecoveryCapacityProvider</code>. It owns:</p>
+<ul>
+<li>the reservation or capacity evidence;</li>
+<li>passwordless authority to start its regional workers;</li>
+<li>the idempotent replay, indexing, compaction, and cleaning jobs;</li>
+<li>progress checkpoints for every lane;</li>
+<li>the minimum and full-performance readiness probes; and</li>
+<li>cleanup after failback or an abandoned attempt.</li>
+</ul>
+<p>Region B's provider may scale a Kubernetes node pool automatically. Region C's
+provider may represent reserved bare-metal capacity that an operator activates.
+If no destination worker remains running, the globally replicated recovery
+intent and a small out-of-region supervisor invoke the provider. No source
+region is allowed to certify its own remote durability receipt.</p>
+<p>Object storage—including S3-compatible stores, GCS, and Azure Blob—contains
+immutable authenticated checkpoint manifests, sealed WAL segments, and sparse
+extent indexes. The destination can initially serve a checkpoint plus WAL
+overlay and compact it in the background; full replay is not automatically on
+the ownership-switch critical path. Cleanup may delete a segment only after
+retention policy and every required descendant receipt allow it.</p>
+<p>Every deferred target separately forecasts live materialized bytes, retained
+checkpoints, uncompacted WAL, bounded chunk-compaction workspace, and the exact
+liability for ingress credits already granted but not yet landed. It need not
+eagerly allocate all of that space: a reserved-elastic provider may commit the
+capacity obligation and supply file, NVMe, or object extents in practical
+increments before its measured provisioning lead time. A sparse file or cloud
+quota alone is not such a reservation.</p>
+<p>If idle-CPU compaction falls behind, sealed WAL overflows through a userspace
+spill stage to another retained file, NVMe, or object-WAL tier. Exhausting both
+admitted primary growth and overflow applies backpressure before the durable
+HWM advances; it never forces compaction into foreground CPU or overwrites an
+acknowledged segment.</p>
+<h2 id="5-declare-asymmetric-activation-plans">5. Declare asymmetric activation plans</h2>
+<p>Create <code>automatic-regional-recovery.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: automatic-regional-recovery
+  namespace: zccusan
+spec:
+  federationRef: tutorial-global
+  volumeSelector:
+    matchNames: [zc-mirror]
+  preferredWriteRegion: region-a
+  ioShape:
+    operationSize: 4Ki
+    readPercent: 70
+    aggregateOutstanding: 128
+    completion: PolicyDurable
+  serviceObjectives:
+    minimumUsable:
+      guaranteedIops: 10000
+      guaranteedBandwidth: 40Mi
+      maximumP99Latency: 20ms
+      readyWithin: 2m
+    fullPerformance:
+      guaranteedIops: 50000
+      readyWithin: 15m
+    enforceDuring: [Snapshot, Migration, Failover, Failback]
+  placements:
+    - region: region-a
+      profileRef: regional-fast
+      custody: Durable
+      access: ReadWrite
+      standby:
+        dataReadiness: MaterializedHot
+        capacity:
+          assurance: AllocatedStatic
+        activation: Automatic
+    - region: region-b
+      profileRef: regional-balanced
+      custody: Durable
+      access: ReadThrough
+      replication:
+        mode: ContinuousWal
+        targetLag: 1s
+        maximumLag: 5s
+      standby:
+        dataReadiness: IndexedWalOverlay
+        capacity:
+          assurance: ReservedAutoscaling
+          providerRef: region-b-recovery-pool
+        activation: Automatic
+    - region: region-c
+      profileRef: regional-capacity
+      custody: Durable
+      access: Snapshot
+      replication:
+        mode: ContinuousWal
+        targetLag: 30s
+        maximumLag: 5m
+      standby:
+        dataReadiness: WalOnly
+        capacity:
+          assurance: ReservedManual
+          providerRef: region-c-reserved-rack
+        activation: ExternalProvisioner
+        fallbacks:
+          - assurance: BestEffort
+            providerRef: region-c-on-demand
+          - assurance: BestEffort
+            providerRef: region-c-interruptible
+  automation:
+    failover:
+      enabled: true
+      requireSourceOwnershipFence: true
+      requireControlQuorum: true
+      requireDestinationCapacityAdmission: true
+      maximumMissingOperationsPerLane: 0
+    failback:
+      enabled: true
+      preferredRegion: region-a
+      stabilityWindow: 10m
+      requireCompleteResynchronization: true
+      requireDestinationCapacityAdmission: true
+</code></pre>
+<p>Apply it once through a healthy global member:</p>
+<pre><code class="language-bash">kubectl --context region-a apply -f automatic-regional-recovery.yaml
+zcctl policy status automatic-regional-recovery --show-admission
+</code></pre>
+<p>The status reports B's hard reservation separately from C's conditional manual
+reservation and best-effort alternatives. Quota alone is not a reservation.
+Best-effort plans receive an estimated start-time distribution and confidence,
+not a guaranteed RTO.</p>
+<p>If C began as tutorial one's read-through cache, changing <code>custody</code> to
+<code>Durable</code> first creates a pending custody facet. The controller pins eviction,
+fills missing checkpoint extents, persists and verifies a hole-free WAL suffix,
+installs independent retention, and commits the qualifying cut in a new
+topology epoch. C may continue serving reads throughout; it does not count
+toward a durability predicate until that sequence completes.</p>
+<p>The scheduler can share a reservation between failure scenarios that cannot
+coexist. It must count it more than once when a declared multi-loss scenario
+requires those recoveries simultaneously.</p>
+<h2 id="6-preview-minimum-service-and-full-service">6. Preview minimum service and full service</h2>
+<pre><code class="language-bash">zcctl recovery preview zc-mirror --unavailable region-a
+zcctl recovery preview zc-mirror --unavailable region-a,region-b
+zcctl recovery preview zc-mirror \
+  --unavailable region-a,region-b --allow-best-effort
+</code></pre>
+<p>For each candidate, the report separates:</p>
+<ul>
+<li>RPO from the newest qualifying durable WAL cut;</li>
+<li>compute and media acquisition time;</li>
+<li>index construction, targeted replay, and overlay attachment time;</li>
+<li>time to the minimum usable IOPS and latency contract;</li>
+<li>time to full performance;</li>
+<li>background compaction and cleaning completion; and</li>
+<li>whether each estimate is guaranteed, conditional on manual action, or best
+effort.</li>
+</ul>
+<p>A target is not promoted merely because its WAL is durable. Conversely, it
+need not finish rewriting the complete volume before serving if its indexed
+overlay can meet the minimum service contract.</p>
+<p>Once a target starts serving, its foreground guarantee has a hard lane-local
+HTB floor. Replay, cache warming, compaction, and cleaning use a separately
+reserved system-work budget and may borrow unused foreground capacity. They
+must yield before reducing the application below its provisioned floor. If an
+RTO requires more background bandwidth than can be borrowed, that bandwidth
+must have been reserved during admission.</p>
+<h2 id="7-exercise-automatic-failover-to-the-elastic-target">7. Exercise automatic failover to the elastic target</h2>
+<p>Start a monotonically increasing canary and watch transitions:</p>
+<pre><code class="language-bash">zcctl canary start zc-mirror --context region-a --continuous
+zcctl volume watch zc-mirror --show-sessions --show-high-water-marks
+zcctl transition watch --volume zc-mirror
+</code></pre>
+<p>Use the separately installed chaos toolbox to isolate region A's data and
+control endpoints. A healthy operation proceeds:</p>
+<pre><code class="language-text">Detected → FencingSource → SelectingDurableCut → ActivatingCapacity
+         → AttachingOverlay → ProvingMinimumService → SwitchingOwnership
+         → RebindingSessions → ScalingTowardFullPerformance
+</code></pre>
+<p>The stable PVC, block identity, or userspace session remains attached. Requests
+may queue briefly at the ownership fence, but clients must not reconnect or
+observe two writable epochs.</p>
+<pre><code class="language-bash">zcctl canary status zc-mirror
+zcctl metrics report zc-mirror --window 60s --include-system-work
+</code></pre>
+<p>The report separates reads, remotely acknowledged writes, local early
+acknowledgements, and sync/FUA drains. Representative high-IOPS results also
+state lane-to-worker and lane-to-CPU mapping.</p>
+<h2 id="8-restore-a-and-observe-failback">8. Restore A and observe failback</h2>
+<p>Remove the fault. A rejoins as a fenced former owner, catches up continuously
+from B, and proves its capacity again. Only after complete resynchronization
+and the stability window does the controller perform the reverse prepare,
+fence, commit, live-session rebind, and drain sequence.</p>
+<pre><code class="language-bash">zcctl region watch region-a --show-catchup
+zcctl transition watch --volume zc-mirror
+</code></pre>
+<p>This is WAL catch-up, not a routine full-volume snapshot copy.</p>
+<p>Continue with <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_POLICY_ON_KUBERNETES.html">policy-derived recovery ordering and an optional HTTPS
+transition gate</a>, or
+remove the policy and federation before uninstalling the three regional charts:</p>
+<pre><code class="language-bash">kubectl --context region-a delete -f automatic-regional-recovery.yaml
+zcctl federation delete tutorial-global --wait
+helm uninstall zccusan --kube-context region-c --namespace zccusan
+helm uninstall zccusan --kube-context region-b --namespace zccusan
+helm uninstall zccusan --kube-context region-a --namespace zccusan
+</code></pre>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-install-one-regional-member-in-each-cluster">1. Install one regional member in each cluster</a><a href="#2-establish-independently-authenticated-membership">2. Establish independently authenticated membership</a><a href="#3-separate-data-readiness-from-capacity-assurance">3. Separate data readiness from capacity assurance</a><a href="#4-give-each-deferred-target-an-activation-owner">4. Give each deferred target an activation owner</a><a href="#5-declare-asymmetric-activation-plans">5. Declare asymmetric activation plans</a><a href="#6-preview-minimum-service-and-full-service">6. Preview minimum service and full service</a><a href="#7-exercise-automatic-failover-to-the-elastic-target">7. Exercise automatic failover to the elastic target</a><a href="#8-restore-a-and-observe-failback">8. Restore A and observe failback</a></nav></div></body></html>

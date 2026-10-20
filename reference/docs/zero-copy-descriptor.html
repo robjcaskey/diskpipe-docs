@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Zero-Copy Descriptor Model · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zero-copy-descriptor-model">Zero-Copy Descriptor Model</h1>
+<p><code>zcutils</code> treats a zero-copy record as metadata plus one or more leased byte
+ranges. The hot path should reorder, split, join, and fan out descriptors
+without normalizing payloads into new contiguous buffers.</p>
+<p>The first command implementation still includes byte-stream compatibility tools
+such as <code>zccat</code>, <code>zcgrep</code>, <code>zctee</code>, <code>zcsink</code>, and <code>zcstat</code>. Those are useful for
+debugging and smoke tests, but a real cross-process zero-copy path needs the
+descriptor protocol below over Unix sockets, shared memory, and fd passing.</p>
+<p>Every descriptor stream starts with a fixed envelope header:</p>
+<pre><code class="language-rust">#[repr(C)]
+pub struct ZcStreamHeader {
+    pub magic: [u8; 8],       // b"ZCSTRM\0\1"
+    pub protocol_version: u16,
+    pub min_reader_version: u16,
+    pub flags: u32,
+    pub header_len: u32,
+}
+</code></pre>
+<p>Version rules:</p>
+<ul>
+<li><code>protocol_version</code>: framing/control protocol version.</li>
+<li><code>min_reader_version</code>: oldest reader that can safely consume this stream.</li>
+<li>incompatible changes must bump <code>protocol_version</code>.</li>
+<li>compatible additions should use length-delimited records and feature flags.</li>
+<li>readers must reject unknown required flags.</li>
+</ul>
+<h2 id="descriptor-streams">Descriptor Streams</h2>
+<p>A <code>ZcDescriptorStream</code> is the Unix-like primitive. It is an ordered control
+stream that carries pool attachments, credits, descriptor records, releases,
+checkpoints, and termination frames. Payload bytes stay in owned pools such as
+ZCRX areas, registered buffers, mapped files, shared memory, or WAL regions.</p>
+<p>A normal shell pipe can carry byte-compatible fallback data, but it is not
+enough for true zero-copy because it cannot pass pool fds or enforce release
+accounting by itself. Descriptor-native pipelines can be started by <code>zcflow</code>
+or an equivalent supervisor that wires Unix sockets, fd passing, credits, and
+release channels before producers begin emitting descriptors.</p>
+<p><code>zcflow</code> should resolve stages through the normal <code>PATH</code>. A descriptor-native
+utility does not need to be compiled into this repository; it only needs to
+speak the descriptor protocol on the inherited control fd or deliberately opt
+into byte-compatible stdin/stdout mode. The expected launch contract is an
+environment such as <code>ZC_DESCRIPTOR_FD</code>, <code>ZC_PROTOCOL_VERSION</code>, <code>ZC_STAGE_INDEX</code>,
+and <code>ZC_STAGE_COUNT</code>, plus normal argv.</p>
+<p>Normal shell composition should also work without an explicit manager command:</p>
+<pre><code class="language-bash">zcdemux ... | zcmap --preserve-lanes | zcmux --peer-addr C ...
+</code></pre>
+<p>In that form, the upstream producer creates or joins a session and writes the
+session identity into the descriptor stream header. Each downstream <code>zc*</code>
+command reads the header, connects to the same manager/session, and propagates a
+fresh header for the next stage. Explicit <code>zcflow</code> is still useful when the user
+wants one process to supervise the whole graph directly.</p>
+<p>Required stream frame families:</p>
+<ul>
+<li><code>STREAM_START</code>: protocol version, flags, topology, and limits.</li>
+<li><code>ZC_CAPS_V1</code>: participant capability advertisement before hot lanes open.</li>
+<li><code>ZC_INTENT_V1</code>: workload policy, objective, durability, sync, and zero-copy
+requirements.</li>
+<li><code>ZC_PLAN_V1</code>: compiled lane, CPU, queue, WAL shard, branch, zipper,
+coalescing, and backpressure contract for one placement epoch.</li>
+<li><code>ZC_STATS_V1</code> and <code>ZC_REPLAN_V1</code>: telemetry and explicit epoch-boundary
+replanning.</li>
+<li><code>POOL_ATTACH</code>: attach a shared memory, mapped file, ZCRX, registered-buffer,
+or device-backed pool.</li>
+<li><code>CREDIT</code>: grant bounded descriptor/byte capacity to an upstream producer.</li>
+<li><code>DESCRIPTOR</code>: one <code>ZcRecordDesc</code> plus its scatter/gather slices.</li>
+<li><code>COLLECTION_START</code> and <code>COLLECTION_END</code>: bounded group with shared ordering
+and failure semantics.</li>
+<li><code>RELEASE</code>: return a <code>release_token</code> to the owning pool authority.</li>
+<li><code>CHECKPOINT</code>: durable or replayable progress marker.</li>
+<li><code>SNAPSHOT_CUT</code>: named point-in-time cut with per-lane WAL/descriptor
+watermarks.</li>
+<li><code>EOF</code>: clean end of stream.</li>
+<li><code>ABORT</code>: error end; outstanding leases are revoked by the pool authority.</li>
+</ul>
+<h2 id="collections-and-lists">Collections and Lists</h2>
+<p>A <code>ZcDescriptorCollection</code> is a bounded group of descriptors with shared
+lifetime, ordering, topology, and failure semantics. It is useful for batching a
+Raft append slice, WAL commit group, scatter/gather file extent, or fanout unit.
+Collections are stream frames, not separate ownership domains: every descriptor
+inside still releases back to the original pool authority.</p>
+<p>A <code>ZcDescriptorList</code> is the concrete serialized form of a collection. It is for
+manifests, tests, checkpoints, and compatibility files. It can be replayed into
+a descriptor stream, but replay must either attach the original pools safely or
+materialize/copy bytes into a new owned pool. A stale list must not grant access
+to recycled buffer generations.</p>
+<h2 id="snapshot-cuts">Snapshot Cuts</h2>
+<p>A point-in-time snapshot should be a descriptor/WAL metadata cut, not a block
+device operation. The minimal descriptor-native shape is:</p>
+<ul>
+<li>a <code>SNAPSHOT_CUT</code> checkpoint with <code>snapshot_id</code>, <code>wal_epoch</code>, ordering mode,
+and per-lane durable sequence or logical-index watermarks.</li>
+<li>extent pins that hold the referenced WAL extents or pool generations until
+the snapshot is released.</li>
+<li>a snapshot manifest, equivalent to a descriptor list, that records lanes,
+shards, byte ranges, sequence ranges, generation tokens, and checksums.</li>
+<li>a restore cursor that replays the manifest and then resumes WAL replay after
+the recorded per-lane watermarks.</li>
+</ul>
+<p>The byte-compatible <code>zcsnap</code> command writes a <code>zcsnap-manifest-v1</code> cut manifest
+for smoke tests and pipeline planning. It deliberately does not freeze block
+devices, clone volumes, manage RAID membership, or add snapshot behavior to
+<code>zcbrd</code>, <code>zcnblk</code>, or <code>zcraid-*</code>.</p>
+<h2 id="soundness-contract">Soundness Contract</h2>
+<p>Every descriptor command must satisfy one of these roles:</p>
+<ul>
+<li>producer: owns a pool and emits descriptors only after downstream credit.</li>
+<li>transformer: passes, splits, joins, or rewrites descriptors without taking
+ownership of payload memory.</li>
+<li>fanout: increments branch references and releases each branch independently.</li>
+<li>terminal consumer: releases every descriptor after send, write, checksum,
+count, materialization, or drop completes.</li>
+<li>supervisor: creates the control channels and tears down outstanding leases on
+process exit, disconnect, or error.</li>
+</ul>
+<p>No command should emit descriptors into an unbounded or unacknowledged stream.
+If a downstream branch is not listening, disconnects, or exits, the upstream
+owner must receive release or abort all leases held for that branch.</p>
+<h2 id="slice-descriptor">Slice Descriptor</h2>
+<pre><code class="language-rust">#[repr(C)]
+pub struct ZcSliceDesc {
+    pub pool_id: u32,
+    pub queue_id: u32,
+    pub buffer_id: u64,
+    pub generation: u32,
+    pub offset: u32,
+    pub len: u32,
+    pub flags: u32,
+    pub numa_node: i16,
+    pub preferred_cpu: i16,
+}
+</code></pre>
+<p>Fields:</p>
+<ul>
+<li><code>pool_id</code>: namespace for the memory pool or mapped region.</li>
+<li><code>queue_id</code>: RX/TX queue or worker-local queue that owns the buffer.</li>
+<li><code>buffer_id</code>: stable token while the buffer generation is live.</li>
+<li><code>generation</code>: protects against stale descriptor reuse after recycling.</li>
+<li><code>offset</code> and <code>len</code>: payload range inside the buffer.</li>
+<li><code>flags</code>: checksum state, encryption state, forwarded state, and other hints.</li>
+<li><code>numa_node</code>: preferred NUMA node for consumers; <code>-1</code> means unknown.</li>
+<li><code>preferred_cpu</code>: producer/queue-local CPU hint; <code>-1</code> means unknown.</li>
+</ul>
+<h2 id="record-descriptor">Record Descriptor</h2>
+<pre><code class="language-rust">#[repr(C)]
+pub struct ZcRecordDesc {
+    pub desc_version: u16,
+    pub desc_len: u16,
+    pub record_id: u64,
+    pub stream_id: u64,
+    pub group_id: u64,
+    pub sequence: u64,
+    pub lane_id: u32,
+    pub preferred_worker: u32,
+    pub total_len: u32,
+    pub slice_count: u16,
+    pub flags: u16,
+    pub release_token: u64,
+}
+</code></pre>
+<p>The record header is followed by <code>slice_count</code> <code>ZcSliceDesc</code> entries. Consumers
+seek by walking the scatter/gather list and translating a logical record offset
+to a <code>(buffer_id, offset, len)</code> view. Reordering should hold descriptors, not
+copy bytes.</p>
+<p><code>desc_len</code> lets newer writers append fields while older readers skip the tail
+when no required feature bit is set. <code>desc_version</code> names the schema used by the
+fixed prefix.</p>
+<h2 id="topology-hints">Topology Hints</h2>
+<h2 id="plan-control-frames">Plan Control Frames</h2>
+<p>Topology-aware descriptors use a control-plane handshake before data frames
+start moving. The control frames are not an optimizer side channel; they are
+the descriptor contract that tells each stage how to preserve zero-copy
+lifetimes, ordering, lane locality, and backpressure.</p>
+<pre><code class="language-text">ZC_CAPS_V1  -&gt; every participant advertises CPUs, NUMA, NIC queues, memory
+               pools, ZCRX/send-zc/liburing/libfabric support, and limits
+ZC_INTENT_V1 -&gt; the workload declares mirror/stripe/raid10/spill/passthrough,
+                read/write mix, objective, durability, sync, and zero-copy policy
+ZC_PLAN_V1  -&gt; the planner compiles lane -&gt; worker -&gt; CPU -&gt; queue -&gt; WAL shard
+               and lane -&gt; branch/replica/stripe mappings for one epoch
+ZC_STATS_V1 -&gt; stages report copies, context switches, migrations, branch lag,
+               pool pressure, and queue/ring overflows
+ZC_REPLAN_V1 -&gt; a new epoch with explicit lane/worker/queue/branch remaps
+</code></pre>
+<p>The hot data plane should not re-run placement policy. It validates
+<code>plan_id</code>, <code>placement_epoch</code>, <code>lane_id</code>, and sequence, then executes the
+compiled map. A descriptor-native data frame therefore carries a compact plan
+reference, not the full plan:</p>
+<pre><code class="language-text">plan_id
+placement_epoch
+lane_id
+sequence
+descriptor lease(s)
+</code></pre>
+<p><code>ZC_PLAN_V1</code> projects onto existing descriptor fields:</p>
+<ul>
+<li><code>ZcRecordDesc.lane_id</code>: compiled lane id and ordering lane.</li>
+<li><code>ZcRecordDesc.preferred_worker</code>: planned local worker or zipper owner.</li>
+<li><code>ZcSliceDesc.queue_id</code>: planned RX/TX queue, WAL shard, or block hctx owner.</li>
+<li><code>ZcSliceDesc.preferred_cpu</code> and <code>numa_node</code>: planned locality target.</li>
+<li>tcpmux topology header: lane, lane count, worker, queue, CPU, and chunk size.</li>
+<li>WAL extent header: lane, shard, record size, record count, and sequence.</li>
+<li>zcnblk topology header: lane, lane count, worker, queue, request id, and
+userspace tier/shard identity.</li>
+</ul>
+<p>Plan changes happen only through <code>ZC_REPLAN_V1</code> at a placement epoch boundary.
+Silent remapping is forbidden because it breaks release accounting, same-sector
+ordering, result-log zipping, sync high-water marks, and benchmark attribution.</p>
+<p>The <code>zcplan</code> command is the current executable prototype. <code>zcplan caps</code> emits
+local <code>ZC_CAPS_V1</code> JSON, and <code>zcplan plan --caps A.json,B.json</code> emits a
+<code>ZC_PLAN_V1</code> JSON document plus a <code>descriptor_projection</code> section showing how
+the compiled topology maps onto descriptor, tcpmux, WAL, and zcnblk fields.</p>
+<h2 id="encryption-hint">Encryption Hint</h2>
+<p>Transport descriptors should distinguish encrypted and plaintext payloads.
+<code>aes-256</code> means AES-256-GCM framed chunks and is the default encrypted zc
+stream format produced by <code>zcencrypt</code> and tcpmux. <code>none</code> is an explicit
+plaintext hint and should only be produced when the user passed
+<code>--encryption none</code>.</p>
+<p>Descriptors should carry locality hints so downstream commands can keep work
+near the source queue and memory when possible:</p>
+<ul>
+<li><code>numa_node</code>: memory locality for mapped files, registered buffers, or RX pools.</li>
+<li><code>preferred_cpu</code>: CPU that received, produced, or should next consume the slice.</li>
+<li><code>queue_id</code>: RX/TX/NVMe queue that owns or best matches the buffer.</li>
+<li><code>lane_id</code>: mux lane or 5-tuple lane associated with the record.</li>
+<li><code>preferred_worker</code>: stable worker/shard hint for <code>zcmux</code>, <code>zcdemux</code>, <code>zctee</code>, and app consumers.</li>
+</ul>
+<p>These fields are hints, not correctness requirements. A consumer may ignore them
+if its topology is different, if the CPU is unavailable, or if applying the hint
+would break ordering/backpressure. When preserved, they let a pipeline avoid
+cross-NUMA copies, L3 cache disruption, queue bouncing, and avoidable worker
+migrations.</p>
+<h2 id="lane-alignment-contract">Lane Alignment Contract</h2>
+<p><code>lane_id</code> is the primary descriptor field for keeping software lanes aligned
+across network, worker, WAL, and storage stages. A stage that receives a record
+with a known <code>lane_id</code> should preserve that value unless it intentionally
+remaps the record.</p>
+<p>For a WAL or block-target pipeline, the preferred mapping is:</p>
+<pre><code class="language-text">lane_id -&gt; transport lane -&gt; RX queue -&gt; worker -&gt; WAL shard -&gt; byte range -&gt; ack lane
+</code></pre>
+<p>The same <code>lane_id</code> should therefore select the same worker/shard class on each
+stage, and the descriptor should carry enough local placement hints for the
+next stage to avoid guessing:</p>
+<ul>
+<li><code>lane_id</code>: stable logical ordering and ownership lane.</li>
+<li><code>preferred_worker</code>: worker or shard that should process this lane locally.</li>
+<li><code>queue_id</code>: queue owner, such as RX queue, TX queue, or block queue.</li>
+<li><code>numa_node</code> and <code>preferred_cpu</code>: locality hints for buffer and worker
+placement.</li>
+<li>storage metadata in an extension field: WAL shard, block shard, base offset,
+and extent length when the producer already knows them.</li>
+</ul>
+<p>If a stage changes lane count, rebalances a hot lane, or stripes one input lane
+over several output shards, it should emit an explicit remap descriptor or
+append an extension that records both the original lane and the new local
+placement. Silent remapping is forbidden for descriptor-native hot paths
+because it breaks per-lane ordering, completion accounting, and profiling.</p>
+<p>Coalescing should preserve lane identity. A WAL coalescer may join many small
+records from the same lane into a larger append extent, but the resulting
+descriptor should still report the source lane, output WAL shard, byte range,
+and sequence range covered by the extent. Cross-lane coalescing requires an
+explicit barrier or sequence map so consumers do not infer false per-lane order.
+See <code>docs/wal-extent-framing.md</code> for the proposed fixed 4K logical record
+extent format.</p>
+<p>The zcnblk fan WAL prototype follows that rule for batched 4K block writes:
+<code>WRITE_BATCH</code> carries one descriptor array followed by one coalesced payload
+area, and <code>RESULT_BATCH</code> carries one result descriptor array. The fan interleaves
+leaf result streams in the lane-local handler aligned to the upstream output
+lane; leaf socket return order is never the placement or freshness contract.</p>
+<h2 id="tcp-mux-topology-header">TCP Mux Topology Header</h2>
+<p><code>zc-tcpmux</code> parallel lanes now use a versioned V2 lane header. It carries the
+same placement intent as descriptor records so a receiver can keep each lane on
+the matching local worker:</p>
+<ul>
+<li><code>lane_id</code> and <code>lane_count</code>: stable mux lane identity for the transfer.</li>
+<li><code>preferred_worker</code>: worker/shard that should own the lane.</li>
+<li><code>queue_id</code>: queue-local owner; currently the lane id for TCP mux traffic.</li>
+<li><code>preferred_cpu</code> and <code>numa_node</code>: sender-side CPU and NUMA hints after
+optional affinity is applied.</li>
+<li><code>flags</code>: whether affinity was applied and whether CPU/NUMA were known.</li>
+<li><code>chunk_bytes</code>: planned per-lane transfer chunk size.</li>
+</ul>
+<p>The header is advisory. <code>zc-tcpmux-receive</code> logs both the sender hint and the
+receiver's actual pinned CPU/NUMA placement. Use <code>--pin-cpus --cpu-list LIST</code>
+on <code>zc-tcpmux-xfer</code> to apply the same lane-to-CPU map to both the local send
+workers and the remote receive workers. <code>--send-cpu-list</code> and
+<code>--receive-cpu-list</code> can diverge the two sides when the machines have different
+topologies.</p>
+<h2 id="zcnblk-topology-header">Zcnblk Topology Header</h2>
+<p><code>zcnblk</code> request and response headers are v2 fixed 64-byte frames. The first 32
+bytes keep the original block contract: op, flags, target shard, payload length,
+and offset. The second 32 bytes carry the placement contract:</p>
+<ul>
+<li><code>lane_id</code> and <code>lane_count</code>: transport lane identity for this request.</li>
+<li><code>preferred_worker</code>: sender-side worker or hardware queue that owns the lane.</li>
+<li><code>queue_id</code>: the queue-local owner, currently the TCP port lane or blk-mq lane.</li>
+<li><code>request_id</code>: wider request identity for batched or acknowledged flows.</li>
+<li><code>tier_id</code>: intended userspace tier or shard; for current block-backed
+last-hop writes this must match <code>shard</code>.</li>
+<li><code>topology_flags</code>: marks the placement fields valid and records port-lane
+mapping.</li>
+</ul>
+<p>The userspace target rejects topology-marked requests that arrive on the wrong
+lane or target a different tier than the encoded shard. That makes silent lane
+remapping visible before the tiering and RAID paths depend on it for ordering,
+backpressure, and locality.</p>
+<h2 id="lifetime">Lifetime</h2>
+<p><code>zcutils</code> owns the authoritative lease table. Consumers receive descriptors and
+must release by token.</p>
+<p>Normal flow:</p>
+<pre><code class="language-text">NIC/ZCRX produces buffer
+  -&gt; zcdemux creates a buffer lease
+  -&gt; zcflow or stream-header discovery has wired downstream credit/release channels
+  -&gt; zcdemux emits a ZcRecordDesc + sglist when credit is available
+  -&gt; zcmap/zctee/zcmaptee/zcmux/app/WAL pass or refcount references
+  -&gt; each async completion or app release decrements references
+  -&gt; refs hit zero
+  -&gt; buffer returns to the RX refill path or userspace pool
+</code></pre>
+<p>Required release events:</p>
+<ul>
+<li>app consumer release</li>
+<li>send-zc completion</li>
+<li>WAL write completion</li>
+<li>demux reorder-window eviction</li>
+<li>fanout branch disconnect</li>
+</ul>
+<p>The app must never directly free RX memory. It sends <code>release_token</code> back to the
+owner, and the owner validates <code>(pool_id, buffer_id, generation)</code> before
+recycling.</p>
+<h2 id="ordering">Ordering</h2>
+<p><code>zcdemux</code> should default to per-stream ordering, not global ordering.</p>
+<pre><code class="language-text">global: unordered
+peer pair: optional ordering
+stream/group: ordered
+fragment: ordered within record
+</code></pre>
+<p>The reorder window stores descriptor references. A late or duplicate record can
+be dropped by metadata without touching payload bytes.</p>
+<h2 id="zero-copy-defaults">Zero-Copy Defaults</h2>
+<p>The network-facing commands default toward zero-copy with portable fallback:</p>
+<ul>
+<li><code>zcmux</code> defaults to <code>--zero-copy-send auto</code>, which uses send-zc when available.</li>
+<li><code>zcdemux</code> defaults to <code>--zero-copy-receive auto</code>, which tries ZCRX and falls back if unavailable.</li>
+<li><code>zcnc connect</code> defaults to automatic send-zc detection.</li>
+<li><code>zcnc listen</code> defaults to automatic ZCRX detection.</li>
+<li><code>zcflow</code> is the intended descriptor supervisor; the current implementation
+uses byte-compatible pipes until fd-passing descriptor transport is added.</li>
+<li><code>zcmap</code> and <code>zcmaptee</code> are the descriptor transform/fanout names; their current
+implementation is a byte-compatible passthrough/fanout.</li>
+<li><code>--zero-copy-receive auto</code> tries ZCRX but falls back to copied receive.</li>
+<li><code>--zero-copy-send auto</code> tries send-zc but falls back to copied send when setup is not allowed.</li>
+</ul>
+<p>Byte-stream tools are intentionally marked as compatibility/debug paths until
+the descriptor socket protocol is implemented.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#descriptor-streams">Descriptor Streams</a><a href="#collections-and-lists">Collections and Lists</a><a href="#snapshot-cuts">Snapshot Cuts</a><a href="#soundness-contract">Soundness Contract</a><a href="#slice-descriptor">Slice Descriptor</a><a href="#record-descriptor">Record Descriptor</a><a href="#topology-hints">Topology Hints</a><a href="#plan-control-frames">Plan Control Frames</a><a href="#encryption-hint">Encryption Hint</a><a href="#lane-alignment-contract">Lane Alignment Contract</a><a href="#tcp-mux-topology-header">TCP Mux Topology Header</a><a href="#zcnblk-topology-header">Zcnblk Topology Header</a><a href="#lifetime">Lifetime</a><a href="#ordering">Ordering</a><a href="#zero-copy-defaults">Zero-Copy Defaults</a></nav></div></body></html>

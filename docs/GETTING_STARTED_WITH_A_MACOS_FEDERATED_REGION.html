@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Untrusted federation 3: run a region on a Mac without Kubernetes · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="untrusted-federation-3-run-a-region-on-a-mac-without-kubernetes">Untrusted federation 3: run a region on a Mac without Kubernetes</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> the standalone peer daemon, macOS durability
+probe, and sender-side coalescing policy on this page define an implementation
+contract. They are not available end-to-end in the current release.</p>
+</blockquote>
+<p>Your friend will not run Kubernetes. That does not prevent his Mac from being a
+federated zccusan region. The Mac runs one unprivileged userspace daemon, keeps
+ciphertext in a regular file, and connects outbound whenever the laptop is
+awake. It does not install CSI, a kernel module, a block device, a container
+runtime, or a local Kubernetes distribution.</p>
+<p>This guide assumes:</p>
+<ul>
+<li>your always-on region sends an encrypted file-set copy;</li>
+<li>the Mac accepts no keys and cannot decrypt that copy;</li>
+<li>both regions are behind NAT and use outbound connections to an opaque relay;</li>
+<li>the Mac may be offline for hours or days;</li>
+<li>your region retains the unsent recovery stream while it is offline; and</li>
+<li>the offered freshness is one recoverable cut every five minutes, subject to
+laptop availability and the receiver's 16 KiB/s limit.</li>
+</ul>
+<p>The five-minute stream is a sender-selected derived recovery view. It does not
+change the friend's inbound ceiling and does not weaken your authoritative
+local WAL.</p>
+<p>The <a href="../reference/docs/wal-custody-tiers.html">WAL custody tier model</a> describes how
+this delayed copy composes with nearby memory holders, geographic forwarding,
+and more immediate disaster-recovery obligations.</p>
+<h2 id="1-understand-the-two-wal-layers">1. Understand the two WAL layers</h2>
+<pre><code class="language-text">application writes
+    ↓
+authoritative local WAL ───────────────→ local durability and PITR
+    │ asynchronous, post-ack consumer
+    ↓
+5-minute outbound coalescer
+    ↓
+derived retained WAL/backlog ─→ relay ─→ Mac file terminal
+</code></pre>
+<p>If one extent changes 10,000 times during a five-minute window, the derived
+stream normally carries its final version once. Ordered discard/TRIM state and
+the cut manifest are preserved. The remote receipt names the exact source cut
+it can reconstruct; it does not pretend to contain every omitted intermediate
+source sequence.</p>
+<p>This distinction is essential:</p>
+<ul>
+<li>local PITR and any fine-grained replica continue consuming the authoritative
+WAL;</li>
+<li>the Mac can promise no better than the emitted five-minute cut granularity;
+and</li>
+<li>coalescing never participates in foreground write or fsync acknowledgement.</li>
+</ul>
+<h2 id="2-install-the-standalone-mac-binary">2. Install the standalone Mac binary</h2>
+<p>Install the signed universal zcutils package using the release mechanism for
+the version supporting this tutorial:</p>
+<pre><code class="language-bash">brew install robjcaskey/tap/zcutils
+zcctl version
+</code></pre>
+<p>The target package includes the same federation framing, receipt validation,
+rate enforcement, and file-terminal code used by regional servers. It does not
+shell out to a Kubernetes client or container runtime.</p>
+<p>Create user-owned state and ciphertext directories:</p>
+<pre><code class="language-bash">mkdir -p "$HOME/Library/Application Support/zccusan/state"
+mkdir -p "$HOME/Library/Application Support/zccusan/ciphertext"
+chmod 700 "$HOME/Library/Application Support/zccusan"
+</code></pre>
+<p>Initialize the local region:</p>
+<pre><code class="language-bash">zcctl region init buddy-mac \
+  --state-dir "$HOME/Library/Application Support/zccusan/state" \
+  --platform macos \
+  --no-kubernetes
+</code></pre>
+<p>The command creates a region identity in the macOS Keychain and a local
+state-log database. It does not create a data-encryption key for your files.</p>
+<h2 id="3-join-the-existing-federation">3. Join the existing federation</h2>
+<p>Create a one-use invitation in your region:</p>
+<pre><code class="language-bash">zcctl federation invite friends-storage \
+  --region buddy-mac --expires 10m --output buddy-mac.invitation
+</code></pre>
+<p>Transfer it over an already authenticated channel. On the Mac:</p>
+<pre><code class="language-bash">zcctl federation join \
+  --region buddy-mac \
+  --invitation buddy-mac.invitation
+rm buddy-mac.invitation
+</code></pre>
+<p>The invitation joins only <code>friends-storage</code>. It does not allow either region to
+enroll the other in another federation, delegate storage, request keys, or
+become a global control leader without a separate explicit grant.</p>
+<h2 id="4-configure-the-outbound-nat-route">4. Configure the outbound NAT route</h2>
+<p>The Mac and your region both dial <code>relay.example.com:443</code>. The relay forwards
+opaque frames but holds no federation vote, durability receipt, or volume key.</p>
+<pre><code class="language-bash">zcctl region route add \
+  --region buddy-mac \
+  --peer my-region \
+  --mode outbound-tcp-relay \
+  --relay relay.example.com:443 \
+  --native-payload-encryption required \
+  --tls required
+</code></pre>
+<p>TCP hole punching may be attempted as an optimization later, but correctness
+never depends on it. When the Mac is asleep or disconnected, the relay does not
+buffer the volume; your sender owns the backlog.</p>
+<h2 id="5-offer-a-bounded-local-file-terminal">5. Offer a bounded local file terminal</h2>
+<p>Create a growable file arena. This example offers at most 100 GB of live
+logical ciphertext, accepts at most 16 KiB/s of complete inbound frames and 100
+logical IOPS, and imports no key material:</p>
+<pre><code class="language-bash">zcctl region media add-file buddy-file \
+  --path "$HOME/Library/Application Support/zccusan/ciphertext/buddy.wal" \
+  --maximum-logical-live-bytes 100G \
+  --allocation best-effort-elastic \
+  --preferred-increment 1G \
+  --sync-probe macos-full-fsync
+
+zcctl federation grant create buddy-inbound \
+  --federation friends-storage \
+  --grantee my-region \
+  --media buddy-file \
+  --maximum-logical-live-bytes 100G \
+  --maximum-framed-ingress 16KiB/s \
+  --maximum-logical-iops 100 \
+  --ciphertext-only \
+  --deny-key-escrow \
+  --reject-key-material \
+  --non-transitive
+</code></pre>
+<p>The daemon probes <code>F_FULLFSYNC</code> support and reports the actual filesystem and
+media evidence. It must not advertise a power-safe HWM if the call or backing
+store cannot supply the requested semantics.</p>
+<p><code>best-effort-elastic</code> grows the file in practical increments but does not claim
+that free laptop space is reserved. An APFS capacity reservation or another
+enforceable provider is required before this becomes <code>reserved-elastic</code>. A
+sparse maximum file length by itself is not a capacity guarantee.</p>
+<p>The data endpoint accepts encrypted replica envelopes only. A peer can always
+hide arbitrary bytes inside opaque ciphertext, but the Mac never recognizes,
+imports, releases, or uses those bytes as a key.</p>
+<h2 id="6-run-only-while-the-laptop-is-available">6. Run only while the laptop is available</h2>
+<p>Run the peer in the foreground:</p>
+<pre><code class="language-bash">zcctl region serve buddy-mac
+</code></pre>
+<p>Alternatively install the same command as a per-user launch agent:</p>
+<pre><code class="language-bash">zcctl region install-launch-agent buddy-mac
+launchctl print "gui/$(id -u)/io.zcutils.buddy-mac"
+</code></pre>
+<p>The launch agent starts after login, reconnects after network changes, and
+stops advertising credits before orderly sleep or shutdown. A sudden
+disconnect is also safe: the sender retains anything not covered by the Mac's
+last authenticated durable receipt.</p>
+<p>The receive contract survives reconnection. A new TCP connection does not
+reset byte credits, IOPS credits, custody quota, or a violation backoff.</p>
+<h2 id="7-add-the-five-minute-sender-side-recovery-view">7. Add the five-minute sender-side recovery view</h2>
+<p>In your Kubernetes region, create <code>buddy-mac-replication.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: GlobalVolumePolicy
+metadata:
+  name: buddy-mac-copy
+  namespace: zccusan
+spec:
+  federationRef: friends-storage
+  volumeSelector:
+    matchNames: [files-for-buddy-copy]
+  placements:
+    - region: my-region
+      custody: Durable
+      access: ReadWrite
+    - region: buddy-mac
+      custody: DurableCiphertext
+      access: RestoreOnly
+      grantRef: buddy-inbound
+      replication:
+        mode: CoalescedWal
+        freshnessInterval: 5m
+        targetLagWhileConnected: 5m
+        maximumLag: 7d
+        foregroundDurabilityContribution: false
+        coalescing:
+          key: LogicalExtent
+          retainWithinWindow: FinalState
+          preserve:
+            - DiscardAndTrim
+            - BarrierCuts
+            - ConsistencyManifests
+          cutConsistency: CrashConsistent
+        disconnectedBacklog:
+          retainAtSender: true
+          capacity:
+            assurance: ReservedElastic
+            providerRef: local-replication-backlog
+            preferredAllocationIncrement: 4G
+          compactUnacknowledgedWindows: true
+          preserveCuts:
+            latestAcknowledgedBase: true
+            protectedPitrCuts: true
+          overflow:
+            mediaClass: local-object-wal-overflow
+          exhaustedAction: MarkNeedsReseedWithoutBlockingForeground
+        compaction:
+          scheduling: Opportunistic
+          localCpu:
+            runBelowUtilization: 30%
+            minimumQuietPeriod: 30s
+            mayPreemptForeground: false
+</code></pre>
+<pre><code class="language-bash">kubectl apply -f buddy-mac-replication.yaml
+zcctl volume watch files-for-buddy-copy \
+  --show-destination buddy-mac \
+  --show-coalescing --show-backlog
+</code></pre>
+<p>The outbound coalescer consumes the WAL asynchronously using its own lane,
+arena, CPU budget, and LatestMap. The existing foreground lane gains no
+allocation, shared atomic, topology lookup, or per-I/O coalescing decision.</p>
+<p>The receiver's byte limit is a ceiling, not a freshness guarantee. At
+16 KiB/s, only about 4.9 MB of framed traffic fits into each five-minute
+interval. If more than that much unique final extent state changes per window,
+lag grows even while the laptop remains connected.</p>
+<h2 id="8-compact-the-disconnected-sender-backlog">8. Compact the disconnected sender backlog</h2>
+<p>The sender retains the last Mac-acknowledged base and newer derived cuts. While
+the laptop is offline, repeated changes to the same extents may be collapsed
+again into one delta from that acknowledged base to the newest eligible cut.</p>
+<p>Compaction is copy-on-write:</p>
+<ol>
+<li>Build a new immutable extent map from the acknowledged base to target cut.</li>
+<li>Persist its data and manifest in local backlog or overflow.</li>
+<li>Verify coverage and commit the replacement manifest.</li>
+<li>Reclaim superseded derived segments only after the commit.</li>
+</ol>
+<p>Fine-grained authoritative WAL and protected PITR cuts are not reclaimed merely
+because this low-bandwidth destination does not need them.</p>
+<p>If opportunistic CPU never becomes available, the derived backlog grows into
+its elastic overflow. If both admitted local capacity and overflow are
+exhausted, this policy marks the Mac replica <code>NeedsReseed</code> and may discard only
+the optional derived stream. It does not block local application writes because
+the policy explicitly excludes the Mac from foreground durability.</p>
+<p>For a destination that does contribute to durability, <code>never block foreground</code>
+would be invalid: the sender must retain or backpressure rather than discard
+the only required recovery material.</p>
+<h2 id="9-watch-an-offline-and-online-cycle">9. Watch an offline and online cycle</h2>
+<p>Stop or sleep the Mac. In your region:</p>
+<pre><code class="language-bash">zcctl volume status files-for-buddy-copy \
+  --destination buddy-mac \
+  --show-last-receipt --show-backlog --show-estimated-rpo
+</code></pre>
+<p>The destination becomes <code>Offline</code> immediately, its remote RPO age increases,
+and the local derived backlog grows or coalesces. It must not remain displayed
+as a current global read point.</p>
+<p>Wake the Mac and start <code>zcctl region serve buddy-mac</code> if it is not managed by
+launchd. The peers authenticate, exchange the last durable cut and current
+contract generation, then resume through the 16 KiB/s credit window:</p>
+<pre><code class="language-bash">zcctl volume watch files-for-buddy-copy \
+  --destination buddy-mac \
+  --show-catchup --show-rate-contract
+</code></pre>
+<p>If the Mac no longer has the acknowledged base, the sender performs a fresh
+checkpoint seed. Otherwise it sends the compacted delta and joins subsequent
+five-minute cuts without replaying superseded hot-block versions.</p>
+<h2 id="10-verify-and-remove-the-standalone-region">10. Verify and remove the standalone region</h2>
+<p>Restore and verify through the source-side client, which owns the decryption
+key:</p>
+<pre><code class="language-bash">zcctl fileset restore files-for-buddy-copy \
+  --from buddy-mac \
+  --at latest-remote-durable \
+  --destination-pvc zccusan/buddy-mac-restore
+zcctl fileset verify files-for-buddy-copy \
+  --restored-pvc zccusan/buddy-mac-restore
+</code></pre>
+<p>Remove the sender policy before revoking the Mac grant:</p>
+<pre><code class="language-bash">kubectl delete -f buddy-mac-replication.yaml
+zcctl federation grant revoke buddy-inbound --retain-existing
+</code></pre>
+<p>On the Mac, wait for the agreed return/delete transition, then remove the
+launch agent and local region:</p>
+<pre><code class="language-bash">zcctl region uninstall-launch-agent buddy-mac
+zcctl region delete buddy-mac
+</code></pre>
+<p>Deleting the daemon does not prove the ciphertext file was erased. Erasure is a
+separate, explicit custody operation whose remote tombstone and local file
+removal must both be observed.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-understand-the-two-wal-layers">1. Understand the two WAL layers</a><a href="#2-install-the-standalone-mac-binary">2. Install the standalone Mac binary</a><a href="#3-join-the-existing-federation">3. Join the existing federation</a><a href="#4-configure-the-outbound-nat-route">4. Configure the outbound NAT route</a><a href="#5-offer-a-bounded-local-file-terminal">5. Offer a bounded local file terminal</a><a href="#6-run-only-while-the-laptop-is-available">6. Run only while the laptop is available</a><a href="#7-add-the-five-minute-sender-side-recovery-view">7. Add the five-minute sender-side recovery view</a><a href="#8-compact-the-disconnected-sender-backlog">8. Compact the disconnected sender backlog</a><a href="#9-watch-an-offline-and-online-cycle">9. Watch an offline and online cycle</a><a href="#10-verify-and-remove-the-standalone-region">10. Verify and remove the standalone region</a></nav></div></body></html>

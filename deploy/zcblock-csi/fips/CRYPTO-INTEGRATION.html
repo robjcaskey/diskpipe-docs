@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>FIPS crypto integration and migration · Diskpipe</title><link rel="stylesheet" href="../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../index.html">Diskpipe</a><a href="../../../kubernetes.html">With Kubernetes</a><a href="../../../standalone.html">Without Kubernetes</a><a href="../../../day-2.html">Day-two operations</a><a href="../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="fips-crypto-integration-and-migration">FIPS crypto integration and migration</h1>
+<p>This is implementation evidence and a review guide, not a completed acceptance
+record or a claim that the application/container has its own CMVP certificate.
+The candidate module is AWS-LC FIPS 3.1.0, certificate 5314. Its Security Policy
+and actual deployment/build evidence control the claim.</p>
+<h2 id="changed-services">Changed services</h2>
+<div class="table-scroll"><table><thead><tr><th>Service</th><th>FIPS implementation</th><th>Evidence</th></tr></thead><tbody>
+<tr><td>Transfer credentials and random session bindings</td><td>AWS-LC SystemRandom / module DRBG</td><td>Individually measured application RNG calls</td></tr>
+<tr><td>Secret lifecycle credential generation</td><td>AWS-LC SystemRandom / module DRBG</td><td>Individually measured generation call; lifecycle tests</td></tr>
+<tr><td>Sequential, parallel, native transport and RPC key derivation</td><td>AWS-LC SP 800-108 Counter HMAC-SHA256</td><td>Each active derivation measured independently</td></tr>
+<tr><td>AES-256-GCM encryption</td><td><code>RandomizedNonceKey</code>, internal 96-bit IV</td><td>Encryption measured with a raw test key, outside the KDF interval</td></tr>
+<tr><td>AES-256-GCM decryption</td><td>Same key/provider; received IV passed to open only</td><td>Isolated service indicators, plaintext equality, negative tests</td></tr>
+<tr><td>Rustls TLS</td><td>Installed AWS-LC FIPS provider; RPC client/server configurations check <code>fips()</code></td><td>Module/provider probes; complete TLS call-graph review still required</td></tr>
+</tbody></table>
+</div>
+<p>The probe uses disposable public test values. Module negative controls deliberately
+call non-approved APIs. Those diagnostic processes are not approved workloads.
+A before/after counter proves only that at least one approved service ran inside
+its interval. It cannot certify arbitrary composite call graphs.</p>
+<p>Credentials must contain 32 random bytes encoded as 64 hexadecimal characters,
+or the existing <code>zct1.issued.expiry.hex</code> transfer envelope. Hex shape checks do
+not prove entropy: operators must generate/import keys through the approved
+credential procedure, never substitute a password or predictable hex string.
+The decoded 32-byte credential is the KDF input. Fixed info contains a versioned
+domain, zero separator, length-prefixed credential representation and context,
+and a 32-bit big-endian output length of 256 bits. Native contexts separate lanes
+and directions. Temporary raw KDF input, output and fixed-info buffers are zeroized.</p>
+<p>Internally generated random IVs do not remove GCM usage limits. Credential
+rotation must bound aggregate encryptions under each derived key across all
+processes/nodes/restarts to the applicable SP 800-38D random-IV limit (at most
+2^32 invocations per key). The application reserves an attempt before each
+application-frame GCM encryption through <code>approved_crypto::seal</code> and rejects
+attempts above 2^32 under the same tracked key in one process. AWS-LC SHA-256
+identifies the actual derived key, so reconstructing a key or sharing it among
+threads does not reset the counter. Failures and authenticated empty frames
+consume attempts too; decryption remains available after exhaustion. The registry
+never evicts keys and rejects unseen encryption keys after 65,536 distinct keys
+have encrypted in that process. Plan capacity and key lifecycle accordingly.
+Do not restart merely to evade a budget or capacity failure: the lifetime
+usage of any reused key must still be accounted for.</p>
+<p>Current expiration/rotation is time-based; there is still no distributed or
+restart-persistent per-key invocation counter. TLS record protection also has
+its own provider/protocol limits and is outside this application-frame counter.
+Deployment review must establish
+a defensible workload/rate/lifetime bound before acceptance. This guide cannot
+substitute for that evidence.</p>
+<h2 id="wire-versions-and-migration">Wire versions and migration</h2>
+<div class="table-scroll"><table><thead><tr><th>Path</th><th>Existing non-FIPS build</th><th>FIPS build</th></tr></thead><tbody>
+<tr><td>Sequential encrypted transfer</td><td><code>ZC_AES256_GCM_FRAME_V1</code></td><td><code>ZC_AES256_GCM_FRAME_V2</code></td></tr>
+<tr><td>Native stream transport</td><td><code>ZCNBAE01</code></td><td><code>ZCNBAE02</code></td></tr>
+<tr><td>Parallel transfer descriptor</td><td><code>ZCTCPMUX_PARALLEL_V2</code> (reads V1 too)</td><td><code>ZCTCPMUX_PARALLEL_V3</code></td></tr>
+<tr><td>Global RPC envelope</td><td><code>ZCGRPC01</code></td><td><code>ZCGRPC02</code></td></tr>
+<tr><td>Legacy native payload-only AES</td><td>Available</td><td>Rejected before socket I/O; use stream encryption</td></tr>
+</tbody></table>
+</div>
+<p>FIPS peers must be upgraded together. There is no automatic downgrade or silent
+reinterpretation of old encrypted data. Non-FIPS builds retain the previous
+cipher/KDF/framing behavior; retain an appropriate old-format tool to decrypt
+existing V1 data, then re-encrypt with the new format in a separately controlled
+migration workflow. The FIPS executable rejects legacy-format ciphertext.</p>
+<p>Native FIPS frames encode a 12-byte module-generated IV, ciphertext, and 16-byte
+tag. The old per-session/sequence nonce calculation is now an authenticated
+session/sequence binding, never the encryption IV. Lane, offset and length AAD
+remain authenticated. Sequential and encrypted parallel EOF markers carry an
+empty authenticated frame, so truncation cannot forge successful completion.
+A streaming receiver can already have emitted earlier authenticated chunks when
+it detects truncation; callers must not publish the output as complete until the
+entire transfer succeeds.</p>
+<p>RPC retains its 28-byte header and 16-byte tag overhead. The V2 header's IV field
+is zeroed when constructing AAD, since the actual IV is returned by AWS-LC after
+encryption. GCM authenticates the actual IV; all other header bytes are AAD.
+Tests flip every header/ciphertext/tag byte, check direction and key separation,
+verify limits, and exercise overlapping credential rotation.</p>
+<h2 id="remaining-acceptance-work">Remaining acceptance work</h2>
+<p>The current UBI builder/runtime on this local non-FIPS host is a functional lab
+configuration. It does not meet the certificate-5314 tested-environment profile.
+Acceptance continues to reject an unsupported builder/node/userspace, missing
+approved-mode/deployment evidence, and incomplete service-map/build review.
+QEMU checks provide functional evidence, not a blanket extension of a certificate.
+A permitted port needs its own reviewed policy basis; do not edit the profile
+solely to turn a local run green.</p>
+<p>The full source inventory still requires dispositions for non-security checksums,
+legacy code excluded by <code>cfg(not(feature = "fips"))</code>, ring, old Rustls brought in
+by k8s-csi/tonic, and every TLS construction site. The CSI gRPC endpoint is a Unix
+socket, but dependency presence alone cannot establish that alternate crypto is
+unreachable. No dependency finding has been silently waived here.</p>
+<p>Review <code>build_procedure</code>, <code>crypto_service_map</code>, <code>operating_policy</code> and
+<code>deployment_scope</code> against the exact image and receipt. In particular, assess
+CMake symbol prefixing/options against the approved source-build instructions,
+external entropy assurance, key generation/import/rotation and aggregate GCM
+limits, TLS certificates/algorithms, module self-test failure handling, and all
+Security Policy operational restrictions. No paid independent lab is automatically
+required merely to embed the upstream module; a reviewer must still supply actual
+evidence for the deployment and the scope of the vendor's claim.</p>
+<p>Sources: <a href="https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314">certificate 5314</a>,
+<a href="https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp5314.pdf">Security Policy</a>,
+<a href="https://github.com/aws/aws-lc-rs/releases/tag/v1.15.3">AWS-LC-Rs 1.15.3 release</a>.</p>
+<h2 id="frozen-version-security-advisories">Frozen-version security advisories</h2>
+<p>Pinning the certificate's source also pins code with upstream security advisories.
+The inventory adds mandatory review findings for the pinned sys packages:
+<a href="https://github.com/aws/aws-lc-rs/security/advisories/GHSA-9f94-5g5w-gf6r">CRL scope checking</a>,
+<a href="https://github.com/aws/aws-lc-rs/security/advisories/GHSA-vw5v-4f2q-w9xf">PKCS7 chain verification</a>,
+<a href="https://github.com/aws/aws-lc-rs/security/advisories/GHSA-hfpc-8r3f-gw53">PKCS7 signature verification</a>,
+and <a href="https://github.com/aws/aws-lc-rs/security/advisories/GHSA-65p9-r9h6-22vj">AES-CCM tag verification</a>.
+The non-FIPS <code>aws-lc-sys</code> 0.36.0 also needs the
+<a href="https://github.com/aws/aws-lc-rs/security/advisories/GHSA-394x-vwmw-crm3">X.509 name constraints</a>
+assessment. The changed application services use AES-GCM, not CCM, and Rustls
+uses WebPKI certificate verification. These are starting points for reachability
+analysis, not a blanket waiver for every shipped binary. No PKCS7/X509/CCM API
+may be added without revisiting this assessment. If an affected operation is
+reachable, use a patched module and a corresponding policy/validation basis;
+do not patch the frozen module and retain an unchanged-source claim.</p>
+<p>Cargo resolves WebPKI 0.103.13 with this wrapper. Upstream's subsequent
+0.103.14 release adds ML-DSA support; 0.103.13 includes the earlier CRL parsing
+and URI name-constraint fixes. See <a href="https://github.com/rustls/webpki/releases">upstream release notes</a>.</p>
+<h2 id="structural-service-assurance-checks">Structural service-assurance checks</h2>
+<p><code>scripts/fips-service-assurances.py</code> collects review inputs from the complete
+first-party Rust source hashes, Cargo inputs and the target-filtered resolved
+Cargo graph. Collection rejects a root without the FIPS feature, a reachable
+AWS-LC wrapper or Rustls 0.23 without its FIPS feature, missing graph nodes, or
+an absent FIPS native provider. It records the paths that bring alternate
+providers into the graph and inventories TLS construction, alternate crypto,
+external RNG and restricted native APIs. The scan includes inactive and test
+code deliberately; it is a review index, not a Rust call-graph analysis.</p>
+<p>Offline image assembly runs the Rust budget/telemetry tests and Python
+assurance tests, then retains <code>cargo-metadata.json</code> and <code>service-inventory.json</code>
+under <code>/usr/share/zcutils/fips/</code>. The build receipt binds both. Deployment
+acceptance recomputes the source/graph inventory and rejects disagreement.
+It writes an incomplete <code>*.service-review-template.json</code>; missing semantic and
+operational records leave the services and operation gates BLOCKED.</p>
+<p>Pass the completed assessment with <code>fips-acceptance.py check --service-review review/service-review.json</code>, alongside the existing <code>--review</code> deployment record.
+The records must describe the same exact image. For separate inspection of
+these inputs, the lower-level commands are:</p>
+<pre><code class="language-sh">cargo metadata --offline --locked --features fips --filter-platform "$TARGET" \
+  --format-version 1 &gt; cargo-metadata.json
+python3 scripts/fips-service-assurances.py collect --source-root . \
+  --cargo-metadata cargo-metadata.json --out service-inventory.json
+python3 scripts/fips-service-assurances.py check --inventory service-inventory.json \
+  --review review/service-review.json --image-digest "$IMAGE_DIGEST"
+</code></pre>
+<p><code>TARGET</code> must match the actual compiled target. To establish coverage of the
+exact release, a named reviewer supplies a schema-1 JSON record binding the
+<code>inventory_sha256</code>, <code>image_digest</code>, <code>reviewed_at</code> and <code>expires_at</code>. Assessment
+must occur within those dates; the assessor sets expiry under the applicable
+policy. No arbitrary maximum duration is imposed by this checker.
+Its <code>findings</code> map must cover exactly every inventory finding ID. Each entry
+contains a disposition (<code>approved-service</code>, <code>non-security-use</code>,
+<code>unreachable-in-release</code> or <code>diagnostic-only</code>), a rationale and a <code>record</code> with
+bundle-relative <code>path</code> and <code>sha256</code>. Full source hashes mean changed control flow
+invalidates the review even when the scanner's matches stay the same.</p>
+<p>To establish permitted operation, <code>sections</code> must bind supporting records for
+<code>tls_service_coverage</code>, <code>dependency_reachability</code>, <code>entropy_and_credentials</code>,
+<code>self_test_failure_handling</code> and <code>operating_conditions</code>, each with <code>path</code> and
+<code>sha256</code>. Reviewers gather these through source tracing, protocol/configuration
+inspection, fault tests and observation of the actual operating environment.
+The script verifies record presence and integrity, not their semantic truth.</p>
+<p>To establish an aggregate GCM usage bound, <code>gcm_key_budgets</code> must enumerate
+<code>key_scope</code>, <code>max_encrypting_instances</code>,
+<code>max_attempts_per_second_per_instance</code>, <code>max_key_lifetime_seconds</code>,
+<code>prior_attempts</code>, and an <code>enforcement_record</code> with <code>path</code> and <code>sha256</code>.
+The checker rejects non-integer bounds, duplicate scopes, missing justification,
+and totals above 2^32:</p>
+<pre><code>prior_attempts + max_encrypting_instances
+              * max_attempts_per_second_per_instance
+              * max_key_lifetime_seconds &lt;= 2^32
+</code></pre>
+<p>These must be enforced maximums over every process/node/restart using the same
+actual key, including retries, failures and empty frames; measured averages are
+insufficient. The reviewer must establish that scopes cannot double-count a
+shared key as independent budgets and that no encryption path is omitted. The
+script cannot discover undeclared key reuse or enforce distributed rates.
+Authenticate the reviewer's identity and records independently and compare the
+image digest with the installed image. Passing these structural checks is not
+a semantic approval, a vendor letter or a CMVP certificate.</p>
+<h2 id="observing-encryption-budgets-alongside-performance">Observing encryption budgets alongside performance</h2>
+<p>The existing control and telemetry-server <code>/metrics</code> endpoints now publish
+label-free <code>zccusan_fips_application_frame_gcm_*</code> gauges for <strong>application-frame
+GCM through <code>approved_crypto::seal</code> in their own process</strong>. These do not observe
+Rustls/AWS-LC TLS record encryption or independent calls by dependencies.
+Performance telemetry emitted by an encrypting process carries the corresponding
+<code>fips_application_frame_gcm_*</code> integer fields, retained through the existing
+non-identifying telemetry allowlist:</p>
+<div class="table-scroll"><table><thead><tr><th>Suffix</th><th>Operator use</th></tr></thead><tbody>
+<tr><td><code>process_max_key_consumed_attempts</code></td><td>Consumption of the most-used application-frame key in this process; recreated key objects share its counter.</td></tr>
+<tr><td><code>process_min_key_remaining_attempts</code></td><td>Smallest remaining tracked application-frame key budget in this process. Zero means at least one key has exhausted its process ceiling. With no tracked keys, this reports the per-key ceiling.</td></tr>
+<tr><td><code>per_key_attempt_limit</code></td><td>Fixed 4,294,967,296 process ceiling for random-IV GCM attempts.</td></tr>
+<tr><td><code>process_tracked_keys</code>, <code>process_registry_key_capacity</code></td><td>Registry occupancy and its fixed capacity; previously unseen encryption keys fail at capacity.</td></tr>
+<tr><td><code>process_exhausted_keys</code></td><td>Number of tracked application-frame keys that have reached the ceiling.</td></tr>
+<tr><td><code>enabled</code>, <code>process_snapshot_available</code></td><td>Whether this build enables the counter and whether the registry snapshot was obtained. Missing detail gauges must not be interpreted as zero consumption.</td></tr>
+<tr><td><code>scope_application_frames_only</code></td><td>Always one: the observations concern application-frame GCM, not every cryptographic service in the process.</td></tr>
+<tr><td><code>tls_record_accounting_complete</code></td><td>Always zero: TLS record usage and its provider/protocol limits must be assessed separately.</td></tr>
+<tr><td><code>cross_process_accounting_complete</code></td><td>Currently always zero: these gauges cannot establish a complete distributed key budget.</td></tr>
+</tbody></table>
+</div>
+<p>Inspect low remaining budget together with the accepted workload/rate/lifetime
+bound and rotate keys before its aggregate ceiling. Do not add remaining budgets
+across processes, reset alerts on process restart, or assume the telemetry-server
+process's counters describe the encryption workers it receives events from.
+Worker performance events preserve their own process scope. No raw key, key hash,
+credential, or per-key label is published. Worst-case per-key consumption and
+remaining-budget gauges avoid both sensitive identifiers and unbounded series.</p>
+<p>A fleet-wide consumed/remaining value for a key reused across nodes or restarts
+still needs coordinated, durable per-key accounting or a reviewed collection
+scheme that preserves private key identity and accounts for missing writers.
+That work is not implemented; the explicit completeness gauge prevents these
+local measurements from being represented as that assurance. The steady-state
+encryption path uses an atomic reservation after the first registry lookup;
+metric snapshots scan the bounded registry outside the encryption operation.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#changed-services">Changed services</a><a href="#wire-versions-and-migration">Wire versions and migration</a><a href="#remaining-acceptance-work">Remaining acceptance work</a><a href="#frozen-version-security-advisories">Frozen-version security advisories</a><a href="#structural-service-assurance-checks">Structural service-assurance checks</a><a href="#observing-encryption-budgets-alongside-performance">Observing encryption budgets alongside performance</a></nav></div></body></html>

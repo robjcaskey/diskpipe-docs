@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Getting started 1: Kubernetes happy path · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="getting-started-1-kubernetes-happy-path">Getting started 1: Kubernetes happy path</h1>
+<p>This deliberately assumes everything goes right: run it from a zcutils checkout with Helm 3, <code>kubectl</code>, three Kubernetes nodes, a kernel included in the <a href="../reference/docs/kernel-module-build-matrix.html">module matrix</a> (otherwise follow the <a href="../docs/BUILD_KERNEL_MODULE.html">custom-kernel build guide</a>), and permission to run privileged CSI Pods. Replace the three example node names.</p>
+<p>Create a namespace to hold the zccusan services and this example workload.</p>
+<pre><code class="language-bash">kubectl create ns zccusan
+</code></pre>
+<p>Get a list of nodes and, to demonstrate the CSI network path, label two as example servers and a different one as the example client.</p>
+<pre><code class="language-bash">kubectl get nodes
+kubectl label node some-node-a storage.zcutils.io/example-server=true
+kubectl label node some-node-b storage.zcutils.io/example-server=true
+kubectl label node some-node-c storage.zcutils.io/example-client=true
+</code></pre>
+<p>Install the CSI.</p>
+<p>On EKS with EFA-direct, first make sure the three selected nodes are
+EFA-capable and install the pinned AWS EFA device plugin. TCP users skip this
+block.</p>
+<pre><code class="language-bash">helm repo add aws-eks https://aws.github.io/eks-charts
+helm repo update aws-eks
+helm upgrade --install aws-efa-device-plugin \
+  aws-eks/aws-efa-k8s-device-plugin \
+  --version v0.5.30 --namespace kube-system --wait --timeout 120s
+kubectl get nodes \
+  -o 'custom-columns=NAME:.metadata.name,EFA:.status.allocatable.vpc\.amazonaws\.com/efa'
+</code></pre>
+<p>Each selected EKS node must report <code>1</code> in the <code>EFA</code> column before continuing.</p>
+<pre><code class="language-bash">helm repo add zcutils https://robjcaskey.github.io/zcutils
+helm repo update
+helm upgrade --install zccusan zcutils/zcblock-csi --version 0.1.6 --namespace zccusan --wait --timeout 120s
+# If your nodes use EFA-direct, add --set backplane.rdma.enabled=true --set backplane.rdma.provider=efa-direct to this command.
+</code></pre>
+<p>Create <code>media-grant.yaml</code> with the following contents to tell zccusan that the example servers can provide fast, volatile RAM storage. It is lost on restart, but it is useful for end-to-end performance testing.</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: MediaGrant
+metadata:
+  name: getting-started-ram
+spec:
+  nodeSelector:
+    matchLabels:
+      storage.zcutils.io/example-server: "true"
+  mediaSets:
+    - name: userspace-memory
+      dynamicSources:
+        - kind: MemoryArena
+          maximumVolumeSize: 1Gi
+      publishAs:
+        mediaClass: getting-started-ram
+        durability: Volatile
+        mayContributeToDurableAcknowledgement: false
+</code></pre>
+<p>Apply it with <code>kubectl apply -f media-grant.yaml</code>.</p>
+<p>Create <code>storage-profile.yaml</code> with the following contents to define a StorageClass named <code>zc-mirror-ram</code> that keeps two copies of each volume's data, one copy on each example server.</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: StorageProfile
+metadata:
+  name: getting-started-mirror-ram
+spec:
+  storageClass:
+    name: zc-mirror-ram
+  frontend: LinuxBlock
+  placement:
+    primitive: Mirror
+    execution: Userspace
+    copies: 2
+    mediaClass: getting-started-ram
+    excludeClientNode: false
+    distinctTopologyKeys:
+      - kubernetes.io/hostname
+  transport:
+    # For EFA-direct, change TcpMux to OfiRdm and uncomment the next three fields.
+    kind: TcpMux
+    # ofiProvider: efa-direct
+    # ofiEndpoint: rdm
+    # deviceResourceName: vpc.amazonaws.com/efa
+    addressSource: NodeAnnotationThenInternalIP
+    nodeAddressAnnotation: storage.zcutils.io/backplane-address
+    lanes: 1
+    connectionsPerLane: 1
+    chunkBytes: 4096
+</code></pre>
+<p>Apply it with <code>kubectl apply -f storage-profile.yaml</code>.</p>
+<p>Create <code>mirror-pvc.yaml</code> with the following contents to request one mirrored volume.</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zc-mirror
+  namespace: zccusan
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: zc-mirror-ram
+  resources:
+    requests:
+      storage: 256Mi
+</code></pre>
+<p>Apply it with <code>kubectl apply -f mirror-pvc.yaml</code>.</p>
+<p>Create <code>mirror-fio.yaml</code> with the following contents to start a small 4 KiB fio smoke test on the example client. This uses the zccusan-owned <code>zccusan-storage-test</code> image rather than installing fio from a third-party image at Pod startup.</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: zc-mirror-fio
+  namespace: zccusan
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: storage.zcutils.io/example-client
+                operator: In
+                values:
+                  - "true"
+  containers:
+    - name: fio
+      image: docker.io/robjcaskey/zccusan-storage-test:0.1.6
+      imagePullPolicy: IfNotPresent
+      command: [fio]
+      args:
+        - --name=zc-mirror-randrw
+        - --filename=/data/fio.bin
+        - --size=96Mi
+        - --rw=randrw
+        - --rwmixread=70
+        - --bs=4k
+        - --ioengine=libaio
+        - --iodepth=16
+        - --direct=1
+        - --runtime=30
+        - --time_based=1
+        - --group_reporting=1
+        - --unlink=1
+        - --output-format=json
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: zc-mirror
+</code></pre>
+<p>Apply it with <code>kubectl apply -f mirror-fio.yaml</code>, then follow fio live until it finishes.</p>
+<pre><code class="language-bash">kubectl -n zccusan logs --follow --pod-running-timeout=120s zc-mirror-fio
+</code></pre>
+<p>Now that fio has finished, delete its Pod so it releases the volume.</p>
+<pre><code class="language-bash">kubectl delete -f mirror-fio.yaml
+</code></pre>
+<p>Create <code>mirror-pgbench.yaml</code> with the following contents to use the same PVC for a real PostgreSQL data directory and run pgbench. The database listens only on the Pod's Unix socket, and the Pod stops PostgreSQL after the benchmark.</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: zc-mirror-pgbench
+  namespace: zccusan
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: storage.zcutils.io/example-client
+                operator: In
+                values:
+                  - "true"
+  containers:
+    - name: pgbench
+      image: docker.io/robjcaskey/zccusan-storage-test:0.1.6
+      imagePullPolicy: IfNotPresent
+      command: [/bin/bash, -ec]
+      args:
+        - |
+          export PGDATA=/data/postgres
+          export PGHOST=/tmp
+          mkdir -p "${PGDATA}"
+          if [ ! -s "${PGDATA}/PG_VERSION" ]; then
+            initdb --auth=trust --encoding=UTF8 --no-locale
+          fi
+          pg_ctl -w start -o "-c listen_addresses= -c unix_socket_directories=/tmp -c min_wal_size=32MB -c max_wal_size=128MB"
+          trap 'pg_ctl -m fast -w stop' EXIT
+          if ! psql --dbname=postgres --tuples-only --command \
+            "SELECT 1 FROM pg_database WHERE datname = 'pgbench'" | grep -q 1
+          then
+            createdb pgbench
+            pgbench --initialize --scale=1 pgbench
+          fi
+          pgbench --client=8 --jobs=4 --time=30 --progress=5 pgbench
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: zc-mirror
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+</code></pre>
+<p>Apply it with <code>kubectl apply -f mirror-pgbench.yaml</code>, then follow pgbench live until it finishes.</p>
+<pre><code class="language-bash">kubectl -n zccusan logs --follow --pod-running-timeout=120s zc-mirror-pgbench
+</code></pre>
+<p>That exercised one mirrored RAM copy on each example server through fio and PostgreSQL from the separate example client. The RAM copies are intentionally <strong>volatile</strong>.</p>
+<h2 id="optional-validate-the-single-region-ha-boundary">Optional: validate the single-region HA boundary</h2>
+<p>Before tearing the example down, you can continue with <a href="../docs/VALIDATING_SINGLE_REGION_HA_ON_KUBERNETES.html">the optional single-region reliability validation</a>. It installs a separate chaos toolbox and runs one simple, graded check while the mirrored volume stays under a continuously synchronized canary workload.</p>
+<h2 id="tear-down">Tear down</h2>
+<p>If you skipped the optional validation, delete the finished pgbench Pod. Then delete the PVC; the generated ZcVolume finalizer deletes its userspace storage Pods and releases both RAM arenas. Delete the StorageProfile so the operator removes its generated <code>zc-mirror-ram</code> StorageClass, and finally remove the MediaGrant that offered the RAM capacity. Leave the CSI installed for the next tutorial.</p>
+<pre><code class="language-bash">kubectl delete -f mirror-pgbench.yaml --ignore-not-found
+kubectl delete -f single-region-ha-canary.yaml --ignore-not-found
+kubectl delete -f single-region-ha-hostpath-comparator.yaml --ignore-not-found
+kubectl delete -f mirror-pvc.yaml
+kubectl delete -f storage-profile.yaml
+kubectl delete -f media-grant.yaml
+</code></pre>
+<p>If any command fails—or before using real disks, RDMA, or performance tuning—continue with <a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES_DETAILED.html">getting started 2</a>, then try <a href="../docs/GETTING_STARTED_WITH_TIERING_ON_KUBERNETES.html">tiering</a> and begin the three-part <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">cross-region replication and recovery series</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#optional-validate-the-single-region-ha-boundary">Optional: validate the single-region HA boundary</a><a href="#tear-down">Tear down</a></nav></div></body></html>

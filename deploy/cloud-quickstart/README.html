@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Disposable managed-Kubernetes quickstart clusters · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="disposable-managed-kubernetes-quickstart-clusters">Disposable managed-Kubernetes quickstart clusters</h1>
+<p>These Terraform roots create the smallest topology that exercises the narrated
+zccusan Kubernetes quickstart without putting storage traffic on a public path:</p>
+<ul>
+<li>one worker zone;</li>
+<li>exactly three small workers by default;</li>
+<li>no worker public ingress;</li>
+<li>node-to-node and Pod-to-node traffic over private addresses; and</li>
+<li>a public Kubernetes API restricted to the operator's single IPv4 <code>/32</code>.</li>
+</ul>
+<p>The GKE root uses a zonal control plane and worker pool. AKS manages control
+plane placement itself, so its explicit single-zone guarantee applies to the
+worker pool. Both roots label every resource as disposable and require an
+expiry epoch, but Terraform destruction remains the authoritative cleanup.</p>
+<p>The workers need outbound HTTPS to pull the pinned public chart and container
+images. The GKE test deliberately leaves external addresses on the nodes rather
+than paying for Cloud NAT; no firewall rule permits public ingress to them. AKS
+uses the managed Standard Load Balancer outbound path and does not give workers
+public IPs. Neither stack creates a workload-facing public load balancer.</p>
+<p>Use the provider-specific README:</p>
+<ul>
+<li><a href="../../deploy/cloud-quickstart/gke/README.html">GKE</a></li>
+<li><a href="../../deploy/cloud-quickstart/aks/README.html">AKS</a></li>
+</ul>
+<p>After either stack has produced a kubeconfig, run the same acceptance script:</p>
+<pre><code class="language-bash">KUBECONFIG=/path/to/disposable-kubeconfig \
+  zccusan/deploy/cloud-quickstart/test-quickstart.sh
+</code></pre>
+<p>The script selects three Ready nodes, labels two as example servers and the
+third as the example client, installs chart <code>0.1.6</code>, and runs the checked-in fio
+and pgbench quickstart resources. It writes evidence under <code>bench-results/</code> and
+cleans up the test resources. Destroy the Terraform root even if the acceptance
+test fails.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

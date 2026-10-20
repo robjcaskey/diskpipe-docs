@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Reproduced executables and image admission · Diskpipe</title><link rel="stylesheet" href="../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../index.html">Diskpipe</a><a href="../../../kubernetes.html">With Kubernetes</a><a href="../../../standalone.html">Without Kubernetes</a><a href="../../../day-2.html">Day-two operations</a><a href="../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="reproduced-executables-and-image-admission">Reproduced executables and image admission</h1>
+<p>The release check compares the unsigned executable bundle from two distinct EC2
+workers. A passing result establishes byte-for-byte equality of all shipped
+application executables, their stable bundle manifest, and the native provider
+objects. It does not establish reproducibility of the complete OCI filesystem,
+SBOMs, signature envelopes, or FIPS deployment conformance.</p>
+<p>Published result: <a href="../../../deploy/zcblock-csi/fips/reproduced/75c89bd43418/README.html">revision 75c89bd43418</a>
+matched on two distinct workers, including the complete unsigned executable
+bundle. The linked signed report identifies the exact images and inputs.</p>
+<p>Build the first release normally. Verify its signed SBOM with an independently
+trusted public key and retain its exported unsigned executable bundle SHA-256 and
+effective build timestamp. Pass both values to the next build on a fresh worker:
+<code>--expected-unsigned-executable-bundle-sha256</code> and <code>--effective-build-timestamp</code>.
+The next build refuses to sign or publish if its bundle differs. Both builds
+compile offline; the optional online comparison is a separate experiment.</p>
+<p>After downloading and verifying both GitHub runs, generate the comparison report,
+badge data, and Sigstore admission policy:</p>
+<pre><code class="language-sh">python3 scripts/zc-reproducibility-admission.py \
+  --first /archive/first/build-artifact \
+  --second /archive/second/build-artifact \
+  --first-launch /archive/first/launch.json \
+  --second-launch /archive/second/launch.json \
+  --trusted-public-key /trust/release-signing-public-key.pem \
+  --image-repository registry.example.org/zcblock-csi \
+  --output-dir /archive/reproduced-release
+</code></pre>
+<p>This command verifies both sets of detached signatures before comparing the
+actual executable files and bundles. Supply launch records from authenticated
+GitHub downloads: they identify the two workers but are not hardware attestations.
+The command creates a new output directory and emits no passing badge if signature
+verification or comparison fails. Archive the report and badge with that release;
+a badge for one release says nothing about later releases. Its label is
+<strong>executable bundle: reproduced on 2 workers</strong>. Do not label it “reproducible OCI
+image” or use it as a FIPS certification badge.</p>
+<p>To publish a new result and update the front-page reproduction badge:</p>
+<ol>
+<li>Finish the two-worker comparison above. Check the full source revisions and
+effective timestamps against the authenticated run records, and check the
+second run passed the expected-bundle-hash gate. Verify both published image
+signatures and registry SPDX/CycloneDX bindings using the
+<a href="../../../deploy/zcblock-csi/IMAGE-VALIDATION.html">image validation guide</a>.</li>
+<li>Create <code>fips/reproduced/&lt;12-character-source-revision&gt;/</code> and copy the three
+generated JSON files into it. Preserve older results. Copy
+<a href="../../../deploy/zcblock-csi/fips/REPRODUCIBILITY-RESULT.template.html">REPRODUCIBILITY-RESULT.template.md</a> into
+that directory as <code>README.md</code>; fill every placeholder from the verified
+records, resolve the conditional paragraphs, and remove its author comment.</li>
+<li>Create <code>verification-manifest.json</code> using the
+<a href="../../../assets/repository/zccusan/deploy/zcblock-csi/fips/reproduced/75c89bd43418/verification-manifest.json">published example</a> as its
+schema. Populate the new revision, date, authority, runs, image digests,
+timestamps, artifact names, and SHA-256 values calculated from the new
+comparison, badge JSON, and policy. Sign this exact file with the release
+signing authority's key, producing <code>verification-manifest.cosign.bundle</code>.
+Never reuse an earlier result's signature. Run the template's verification
+commands against the new manifest and files.</li>
+<li>Update the front-page <strong>reproducible build</strong> and <strong>offline build</strong> badges' revisions and result links
+with the newly verified revision and directory. Keep the visible revision in
+each value: <code>verified @&lt;revision&gt;</code>. Use label–value pairs, such as
+<code>reproducible build | verified @75c89bd4</code> and
+<code>offline build | verified @75c89bd4</code>. The offline-build badge also needs the
+recorded network isolation and selection of offline artifacts. The live <strong>Image build</strong> and <strong>FIPS gate tests</strong> badges update from
+GitHub automatically and need no release-specific edit. Add the new result
+link to this guide.</li>
+<li>Check that no template placeholders remain, all relative links resolve from
+the result directory, and the advertised hash agrees with the signed manifest,
+comparison, registry SBOMs, and admission policy. Commit and publish the result
+and badge together. A failed or incomplete comparison leaves the previous
+revision's badge unchanged.</li>
+</ol>
+<p>The result template records what was verified; filling it in does not perform
+the checks or authorize a passing badge.</p>
+<p>The normal image build with <code>--sign-image</code> publishes signed SPDX and CycloneDX
+attestations to the image registry using Cosign, then fetches and verifies their
+exact contents and image digest. An admission controller can discover these
+registry attestations; detached files in a GitHub artifact alone are insufficient.
+The registry must be reachable by the cluster. The canonical workflow publishes its final image to Docker Hub; its loopback
+registry stores build cache only. A copied image must carry attestations bound
+to its actual destination digest.</p>
+<p>The generated <code>cluster-image-policy.json</code> is a Sigstore <code>ClusterImagePolicy</code>.
+It requires an SPDX attestation signed by the supplied trusted public key and
+exactly one bundle-hash annotation matching the independently compared bundle.
+It does not trust a self-declared <code>reproducible: true</code> field. The controller checks
+the signature and image binding; the release comparison performs the rebuild.
+End-user organizations select the trusted signing authority and image repository.</p>
+<p>Install <a href="https://docs.sigstore.dev/policy-controller/installation/">Sigstore policy-controller</a>,
+review and apply the generated policy, and enable enforcement for the deployment
+namespace as described in the
+<a href="https://docs.sigstore.dev/policy-controller/overview/">controller documentation</a>.
+Before using this as a deployment gate, exercise a matching image, a mismatched
+bundle hash, a wrong signing key, and a missing attestation in an isolated test
+namespace. Confirm only the matching image is admitted. Unit tests of the policy
+generator do not substitute for that cluster test.</p>
+<p>Local integration check (2026-09-15): the generated policy was exercised through
+server-side dry-run admission in disposable K3s 1.36.4 with policy-controller
+Helm chart 0.10.8 (app 0.13.1). A real KMS-signed smoke-image SBOM passed; an
+unexpected bundle hash, an absent attestation, and a different trusted key were
+denied. This tests the admission mechanism with a fixture, not reproduction of a
+release. Release-specific comparison and signature checks still precede its badge.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>HA and PITR consensus metadata · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="ha-and-pitr-consensus-metadata">HA and PITR consensus metadata</h1>
+<p>The HA metadata layer is separate from <code>/dev/zcnblk0</code> and from userspace
+payload placement. It does not mirror, stripe, spill, or select a terminal
+block device. Lane-local userspace WAL stages remain the data plane.</p>
+<h2 id="completion-contracts">Completion contracts</h2>
+<p>An ordinary write may be acknowledged according to the configured local WAL
+admission policy. A sync, FUA, or other durability barrier completes only after
+the configured durable witnesses cover the barrier. The common tiered policy is
+one retained hop WAL plus one downstream leaf in a different failure domain.
+This provides two copies without requiring two of three leaves.</p>
+<p>The data durability policy and the metadata Raft quorum are independent. A
+three-voter metadata group still requires two voters for leadership, while the
+data policy may require <code>one hop + any one leaf</code>.</p>
+<p>Durable reports are bound to:</p>
+<pre><code class="language-text">(group_id, term, config_epoch, log_id, replica_id, lane_hwms)
+</code></pre>
+<p><code>certify_durable_hwm()</code> validates configured roles and failure domains and
+produces a <code>DurabilityCertificate</code>. This direct certificate can complete a
+client barrier; the client does not wait for an additional metadata Raft entry.
+Reports must be persisted with the replica WAL before they are sent. A newly
+elected hop can therefore reconcile retained reports and recover a valid
+coverage HWM.</p>
+<p><code>HaCommand::PublishHwm</code> checkpoints a certificate through consensus. It bounds
+failover reconciliation and supplies committed cuts for management operations,
+but is not required for every client sync. Multiple client syncs may join one
+lane drain and one durability certificate.</p>
+<p>The hop may not evict a certified prefix until another admitted witness set
+covers it and all snapshot/PITR retention pins permit retirement. Raft's
+knowledge of a copy is metadata and never counts as a data copy.</p>
+<h2 id="authority-and-reads">Authority and reads</h2>
+<p>A committed <code>GrantLease</code> binds leader identity and expiration to one Raft term
+and configuration epoch. It requires a metadata-voter majority. A leader change
+without a higher term is rejected. Expiration is fail-closed; explicit
+revocation is only an optimization because a partition can suppress it.</p>
+<p>Each lane worker resolves its <code>Arc&lt;PublishedGroupView&gt;</code> when routing changes and
+caches the leader hash. The hot check is a cache-line-aligned atomic snapshot of:</p>
+<pre><code class="language-text">(term, config_epoch, placement_epoch, leader_hash,
+ lease_expires_unix_nanos, certified_floor)
+</code></pre>
+<p>The registry lock is not acquired per I/O. Publishing uses a sequence counter;
+readers observe either the old complete view or the new complete view. Payload
+lookup remains in the existing dirty/read overlay. The overlay or applied HWM
+must cover the certified HWM before a read is current.</p>
+<p>Dynamic durability ownership, characteristic patches, and fenced handoff are
+described in <a href="../../reference/docs/dynamic-topology.html">dynamic-topology.md</a>.</p>
+<h2 id="multi-raft-snapshot-and-pitr-cuts">Multi-Raft snapshot and PITR cuts</h2>
+<p><code>CaptureSnapshot</code> and <code>CaptureRecoveryPoint</code> are committed metadata operations.
+They capture the certified cut of every configured group belonging to a volume.
+Each group cut records its term, configuration epoch, log identity, and per-lane
+HWM vector. A recovery point may reference a base snapshot only when every
+target group/lane is at or beyond that base cut.</p>
+<p>Snapshots referenced by recovery points cannot be deleted. <code>retention_floor()</code>
+returns the oldest named cut for a group/lane so the WAL extent manager can pin
+the required suffix. This is metadata pinning only; block devices remain
+terminal leaves after userspace placement.</p>
+<p>The QEMU evolution harness exercises the payload side of this contract. Each
+userspace node durably installs a versioned key/value WAL and materialized
+snapshot before replying. A recovery bundle contains a digest-checked base
+snapshot and only the contiguous WAL suffix through the selected recovery cut.
+The target reconstructs the state in a staged replica, syncs it, rereads it,
+and reports the selected sequence plus canonical SHA-256 digest. Only then does
+the topology controller activate custody and publish a new two-region durable
+HWM certificate. See <a href="../../reference/docs/dynamic-topology.html#qemu-topology-evolution-proof">dynamic-topology.md</a>.</p>
+<p>The same harness separately removes two of three supervisor voters, removes a
+payload witness, and overlaps supervisor-quorum loss with loss of both payload
+sources. Supervisor loss rejects metadata and topology changes without durable
+revision movement; payload loss invalidates durability coverage; the overlap
+rejects both recovery reads and control-plane changes until the required
+failure domains return.</p>
+<h2 id="persistence-and-integration-boundary">Persistence and integration boundary</h2>
+<p>Committed HA commands use the existing checksummed, torn-tail-recoverable
+<code>FileLogStream</code>. The envelope now stores the real committed term instead of
+hard-coding zero. State is reconstructed by replay, requires contiguous indexes,
+and rejects term regression before publishing any read view.</p>
+<p><code>HaMetadataStore</code> is the Raft application state machine and durable committed
+entry sink. It does not implement elections or networking itself. Production
+deployment must put a maintained Raft runtime in front of <code>apply_committed()</code>
+and persist vote/log state before replying to Raft RPCs. The older
+<code>raft-leader</code> and <code>raft-wal-leader</code> commands remain transport benchmarks, not an
+HA runtime.</p>
+<h2 id="performance-gate">Performance gate</h2>
+<pre><code class="language-bash">URING_PLAY_PIN_CPU_LIST=0 URING_PLAY_TOPOLOGY_STRICT=1 \
+  target/release/zcha-readview-bench 1000000000 1
+</code></pre>
+<p>The output states lane/worker/CPU mapping and labels the result as a local
+atomic-check microbenchmark, not end-to-end block IOPS. The EFA <code>/dev/zcnblk0</code>
+5.064M random-read topology must be rerun on equivalent hardware after the
+authority view is connected to the live route publisher.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#completion-contracts">Completion contracts</a><a href="#authority-and-reads">Authority and reads</a><a href="#multi-raft-snapshot-and-pitr-cuts">Multi-Raft snapshot and PITR cuts</a><a href="#persistence-and-integration-boundary">Persistence and integration boundary</a><a href="#performance-gate">Performance gate</a></nav></div></body></html>

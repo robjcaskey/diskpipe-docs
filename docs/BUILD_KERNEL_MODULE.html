@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Build a zccusan kernel module · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="build-a-zccusan-kernel-module">Build a zccusan kernel module</h1>
+<p>A kernel module must be built against the prepared build tree for the exact
+kernel that will load it. The commands below are one concrete example for an
+Amazon Linux 2023 machine; adapt the package-manager step for other Linux
+systems, but keep the exact <code>uname -r</code> check.</p>
+<p>For the researched EKS, GKE, AKS, Debian, UBI/EL10, and NixOS container/QEMU
+matrix, see <a href="../reference/docs/kernel-module-build-matrix.html">Kernel-module build matrix</a>.
+That builder creates no cloud resources and pins exact versions and research
+sources in <code>kmods/matrix/targets.json</code>.</p>
+<p>From a reviewed zcutils checkout, run:</p>
+<pre><code class="language-bash">set -euo pipefail
+
+kernel="$(uname -r)"
+kernel_series="$(printf '%s\n' "$kernel" | cut -d. -f1,2)"
+case "$kernel_series" in
+  *[!0-9.]*) printf 'unexpected kernel release: %s\n' "$kernel" &gt;&amp;2; exit 1 ;;
+esac
+
+sudo dnf install -y \
+  gcc make elfutils-libelf-devel kmod \
+  "kernel${kernel_series}-devel-${kernel}"
+
+test -r "/lib/modules/${kernel}/build/Makefile"
+scripts/zccusan-build-kmod-on-linux-host.sh \
+  --output ./dist/zccusan-kmods
+</code></pre>
+<p>The final line begins with <code>ZCCUSAN_KMOD_BUILD_READY</code>. Inspect the exact
+artifact rather than selecting a nearby kernel:</p>
+<pre><code class="language-bash">module="./dist/zccusan-kmods/$(uname -m)/$(uname -r)/zcnblk_client_mod.ko"
+test -r "$module"
+sha256sum -c "${module}.sha256"
+test "$(modinfo -F name "$module")" = zcnblk_client_mod
+case "$(modinfo -F vermagic "$module")" in
+  "$(uname -r) "*) ;;
+  *) printf 'module does not match the running kernel\n' &gt;&amp;2; exit 1 ;;
+esac
+</code></pre>
+<p>To package it for the Helm chart, choose a repository you control and publish
+the resulting image by immutable digest:</p>
+<pre><code class="language-bash">export MODULE_FILE="$module"
+export MODULE_ARCH="$(uname -m)"
+export KERNEL_RELEASE="$(uname -r)"
+export IMAGE="registry.example.com/storage/zcblock-csi:${KERNEL_RELEASE}-${MODULE_ARCH}"
+
+zccusan/deploy/zcblock-csi/build-kmod-image.sh
+docker push "$IMAGE"
+docker inspect --format '{{json .RepoDigests}}' "$IMAGE"
+</code></pre>
+<p>Record the resulting full DaemonSet OCI digest as <code>image.digest</code> and the module
+SHA-256 as <code>nodeSetup.moduleSource.sha256</code> in the values supplied to Helm. If
+the kernel enforces module signatures, sign the final module with a key that
+kernel trusts before calculating its final checksum and packaging it.</p>
+<p>Fetch these instructions for inspection without piping them into a shell:</p>
+<pre><code class="language-bash">curl --fail --location --proto '=https' \
+  --output BUILD_KERNEL_MODULE.md \
+  https://raw.githubusercontent.com/robjcaskey/zcutils/main/zccusan/docs/BUILD_KERNEL_MODULE.md
+less BUILD_KERNEL_MODULE.md
+</code></pre>
+<p>The rendered guide is on
+<a href="../docs/BUILD_KERNEL_MODULE.html">GitHub</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

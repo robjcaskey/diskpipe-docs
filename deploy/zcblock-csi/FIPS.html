@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>FIPS images and test environments · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="fips-images-and-test-environments">FIPS images and test environments</h1>
+<p>This is a <strong>FIPS-aspiring application build</strong>, not a validated CSI product or a
+claim that all cryptographic services are approved. A passing runtime probe
+does not establish certificate coverage. Never promote a lab report into a
+CMVP validation statement.</p>
+<p>For deployment criteria, evidence, and the SG-8 vendor
+statement, see <a href="../../deploy/zcblock-csi/fips/FIPS-OVERVIEW.html">zccusan FIPS overview</a>.</p>
+<h2 id="image-variants">Image variants</h2>
+<div class="table-scroll"><table><thead><tr><th><code>FIPS_DISTRO</code></th><th>Build and runtime</th><th>Scope</th></tr></thead><tbody>
+<tr><td><code>amzn2023</code> (default)</td><td>Amazon Linux 2023 userspace</td><td>Certificate-5314 candidate userspace; acceptance still requires a listed bare-metal node and approved operation</td></tr>
+<tr><td><code>ubuntu</code></td><td>Ubuntu 22.04 userspace</td><td>Compatibility lab outside the selected certificate profile</td></tr>
+<tr><td><code>ubi9</code></td><td>UBI9 userspace</td><td>Public-repository lab: provider checks and TCP/block paths only; no filesystem provisioning tools or RDMA</td></tr>
+<tr><td><code>rhel9</code></td><td>UBI9 expanded with entitled RHEL9 packages</td><td>Full CSI tool set; entitled repositories required</td></tr>
+</tbody></table>
+</div>
+<p>All variants compile with <code>--locked --features fips</code>, select AWS-LC for the
+process-default rustls provider, and include <code>zc-fips-check</code>. They do not switch
+to the OS OpenSSL implementation. Builder and runtime use the same distribution
+libraries; the UBI variant no longer overlays Debian libraries onto UBI.
+<code>FIPS_DISTRO</code> selects the final runtime. <code>FIPS_BUILD_DISTRO</code> defaults to the
+same value; <code>rhel9</code> building for <code>ubi9</code> is the additional supported combination.</p>
+<p>The Rust toolchain is copied from the <code>RUST_IMAGE</code> stage. The native crypto
+module is supplied by <code>FIPS_PROVIDER_ROOT</code>; the container build never compiles
+it. Create that directory with the exact procedure in the
+<a href="../../deploy/zcblock-csi/fips/AWS-LC-RECOMPILATION.html">AWS-LC recompilation guide</a>. The build fails if
+the package or its certificate-profile receipt is missing.</p>
+<pre><code class="language-sh">FIPS_DISTRO=amzn2023 FIPS_PROVIDER_ROOT=zccusan/deploy/zcblock-csi/fips/provider \
+  zccusan/deploy/zcblock-csi/build-fips-image.sh
+FIPS_DISTRO=ubuntu zccusan/deploy/zcblock-csi/build-fips-image.sh
+FIPS_DISTRO=ubi9 zccusan/deploy/zcblock-csi/build-fips-image.sh
+# On an entitled RHEL build host, using supported subscription mounts:
+FIPS_DISTRO=rhel9 zccusan/deploy/zcblock-csi/build-fips-image.sh
+</code></pre>
+<p>Override <code>UBI_IMAGE</code>, <code>RHEL_IMAGE</code>, <code>UBUNTU_IMAGE</code>, and <code>RUST_IMAGE</code> with immutable
+references for a recorded candidate. Use <code>KMOD_BUNDLE_ROOT</code> to supply the
+architecture/kernel-specific client module bundle. Empty bundles are suitable
+for provider probes only; full CSI node setup requires matching artifacts.
+<code>CONTAINER_ENGINE</code> selects Podman or Docker. <code>FIPS_PODMAN_STORAGE=/tmp/zc-fips-podman</code>
+keeps build storage off a full workspace filesystem. Scripts do not publish images.</p>
+<h3 id="thin-ubi-runtime-with-a-separate-builder">Thin UBI runtime with a separate builder</h3>
+<p>The UBI variant starts its final stage from a fresh UBI runtime and copies only
+our executables, build evidence, and the supplied client-module bundle. Compiler
+tools and entitled RHEL packages remain in the builder. Do not publish the
+builder image or export its build cache to a public registry. Deleting packages
+at container startup, or in a later image layer, does not remove their bytes
+from earlier downloadable layers.</p>
+<pre><code class="language-sh"># Entirely public UBI package sources, including the compiler stage:
+FIPS_DISTRO=ubi9 zccusan/deploy/zcblock-csi/build-fips-image.sh
+# Optional entitled RHEL compiler stage, with the same thin UBI runtime:
+FIPS_BUILD_DISTRO=rhel9 FIPS_DISTRO=ubi9 \
+  zccusan/deploy/zcblock-csi/build-fips-image.sh
+</code></pre>
+<p>Both forms explicitly disable libfabric at compile time. Filesystem-formatting
+tools and RDMA are absent from this TCP/block lab image; deleting <code>libfabric</code>
+from a binary that links it would prevent that binary from loading. Full storage
+functionality still needs redistributable runtime dependencies or separately
+licensed deployment packaging. No crypto-provider stripping or startup package
+deletion is used.</p>
+<p>The UBI stages allow only named public UBI repositories, including when built
+on an entitled RHEL host. The final UBI build rejects compiler tools and the
+omitted storage packages and checks every packaged executable for missing shared
+libraries. <code>image-stages.txt</code>, <code>runtime-packages.tsv</code>, and <code>runtime-linkage.txt</code>
+under <code>/usr/share/zcutils/fips</code> record the stage selection and runtime contents.
+These checks establish packaging properties, not a complete license audit:
+copied executables, statically linked dependencies, and supplied kernel modules
+must themselves be redistributable, with their notices/source obligations met.
+Retain UBI's EULA and licenses. Container thinning does not establish FIPS
+certificate coverage.</p>
+<p>See <a href="https://docs.docker.com/build/building/multi-stage/">Docker multi-stage builds</a>,
+<a href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/building_running_and_managing_containers/assembly_adding-software-to-a-ubi-container_building-running-and-managing-containers">Red Hat's UBI package-repository guidance</a>,
+and the <a href="https://developers.redhat.com/articles/ubi-faq">UBI redistribution FAQ</a>.</p>
+<p>The image records Cargo.lock, dependency tree, compiler versions, binary hashes,
+and its build-provider probe in <code>/usr/share/zcutils/fips</code>. Verify executable hashes
+with <code>cd /usr/local/bin &amp;&amp; sha256sum -c /usr/share/zcutils/fips/binaries.sha256</code>. Normal first-party
+entrypoints require the guest/node kernel FIPS flag through
+<code>ZC_REQUIRE_HOST_FIPS=1</code>. Setting it to <code>0</code> is an explicit provider-only lab
+override; it is never accepted by the strict guest test.</p>
+<pre><code class="language-sh">podman run --rm --network none --entrypoint /usr/local/bin/zc-fips-check \
+  localhost/zcblock-csi-fips-ubuntu:dev --require-fips
+# On a genuine FIPS guest/node, also require the kernel mode:
+podman run --rm --network none --entrypoint /usr/local/bin/zc-fips-check \
+  localhost/zcblock-csi-fips-ubuntu:dev --require-fips --require-host-fips
+</code></pre>
+<p>Run the repeatable image smoke suite (provider mode, host-mode enforcement,
+binary hashes, and isolated CSI listener startup):</p>
+<pre><code class="language-sh">python3 scripts/fips-image-smoke.py \
+  --image localhost/zcblock-csi-fips-ubuntu:dev \
+  --image localhost/zcblock-csi-fips-ubi9:dev --report /tmp/fips-images.json
+# Add --storage /tmp/zc-fips-podman if built with FIPS_PODMAN_STORAGE there.
+python3 scripts/test_fips_qemu_lab.py
+</code></pre>
+<p>The smoke suite's listener check explicitly overrides host enforcement inside
+a container with no host mounts/devices/network. Its report marks actual FIPS
+guest, OpenShift, and full storage acceptance as unrun.</p>
+<h2 id="debian-outside-genuine-fips-guests-inside">Debian outside, genuine FIPS guests inside</h2>
+<p>Debian can run the QEMU/KVM host and tooling. Its own FIPS status is not inherited
+by guests. Whether the outer virtualization environment is covered by a chosen
+certificate is a separate review. The harness does not certify Debian.</p>
+<pre><code class="language-sh">python3 scripts/fips-qemu-lab.py preflight --target ubuntu --report /tmp/fips-preflight.json
+</code></pre>
+<p>Prerequisites for a standalone guest:</p>
+<ul>
+<li>Writable <code>/dev/kvm</code>, QEMU, <code>qemu-img</code>, SSH/SCP, and adequate free storage/RAM.</li>
+<li>A standalone BIOS-bootable installed qcow2 Ubuntu or RHEL guest, with vendor FIPS packages
+configured, rebooted, and <code>/proc/sys/crypto/fips_enabled</code> equal to <code>1</code>.</li>
+<li>Guest Podman and an SSH account with noninteractive sudo for the lab commands.
+Use an RSA SSH key of at least 3072 bits for broad FIPS guest compatibility.</li>
+<li>A guest provisioned according to its vendor's procedure. Do not fake the
+kernel flag, use a host-built replacement kernel, or treat generic Ubuntu
+cloud images as already FIPS enabled.</li>
+</ul>
+<p>Ubuntu requires a Pro account; RHEL requires appropriate subscription access.
+Tokens and pull secrets belong in vendor provisioning workflows, never in this
+repository, container build arguments, committed cloud-init, or reports.</p>
+<pre><code class="language-sh"># Keep this running in its own terminal. Base is never modified.
+python3 scripts/fips-qemu-lab.py boot --target ubuntu \
+  --base /path/ubuntu-fips.qcow2 --sha256 &lt;base-sha256&gt; \
+  --work-dir /path/fips-ubuntu-run --ssh-port 2244
+
+podman save --format oci-archive -o /tmp/zc-fips-ubuntu.tar localhost/zcblock-csi-fips-ubuntu:dev
+podman image inspect localhost/zcblock-csi-fips-ubuntu:dev --format '{{.Id}}'
+python3 scripts/fips-qemu-lab.py guest --target ubuntu \
+  --work-dir /path/fips-ubuntu-run --ssh-port 2244 --user lab \
+  --ssh-key /path/lab-rsa --archive /tmp/zc-fips-ubuntu.tar \
+  --image-id sha256:&lt;image-id&gt; --report /tmp/fips-ubuntu.json
+</code></pre>
+<p>Repeat with <code>--target rhel</code> and the matching image archive. UBI is a container,
+not a QEMU guest. The guest probe checks image content identity, the real kernel
+flag, AWS-LC mode, and TLS provider mode. It does <strong>not</strong> exercise provisioning,
+replication, CSI sidecars, or every cryptographic service.</p>
+<h2 id="temporary-rhel-runners-on-ec2">Temporary RHEL runners on EC2</h2>
+<p>An official <strong>subscription-included RHEL AMI</strong> provides RHEL and regional RHUI
+package access through the AWS bill. A separately purchased Red Hat subscription
+or Red Hat login is not required for this option. Choose the subscription-included
+image rather than a BYOL/Cloud Access image. EC2 RHEL usage is billed per second
+with a 60-second minimum; instance time, storage, public IPv4, and applicable
+data transfer still cost money. This subscription does not supply an OpenShift
+subscription or pull secret, or entitlement to run the EC2 image outside AWS.</p>
+<p>For a short host test, use <code>scripts/ec2_perf_spot.py launch</code> with an explicit
+Red Hat-owned RHEL 9 AMI, one small x86_64 instance, an existing SSH security
+group/subnet, a temporary RSA key, one network interface, <code>--no-enable-efa</code>,
+an absolute <code>--drop-dead-utc</code>, <code>--max-spot-price</code>, and <code>--max-total-cost</code>.
+Keep the helper's termination tags and root-volume <code>DeleteOnTermination</code>.
+Verify the subnet's internet route is active as well as checking SSH ingress;
+automatic public-IP assignment alone does not establish connectivity. Spot
+capacity can be unavailable in an individual availability zone. The existing
+helper launches Spot only. An On-Demand fallback must preserve its run/deadline
+tags, root-volume deletion, and spending checks, using an independently checked
+On-Demand price. The discovery test used the helper's reviewed request as that
+template; it did not add an On-Demand option to the shared Spot helper.</p>
+<p>Create an independent one-time EventBridge Scheduler target immediately after
+the instance ID is known and verify it before bootstrapping the workload:</p>
+<pre><code class="language-json">{
+  "Arn": "arn:aws:scheduler:::aws-sdk:ec2:terminateInstances",
+  "RoleArn": "arn:aws:iam::ACCOUNT:role/temporary-run-termination",
+  "Input": "{\"InstanceIds\":[\"i-EXACT_INSTANCE_ID\"]}"
+}
+</code></pre>
+<p>Use <code>at(UTC_TIMESTAMP)</code>, timezone <code>UTC</code>, flexible window <code>OFF</code>, bounded retries,
+and <code>ActionAfterCompletion=DELETE</code>. The execution role may terminate only this
+run's instance, using its ARN and/or a unique run-tag condition. Restrict the
+role's trust to <code>scheduler.amazonaws.com</code>, the account, and the <strong>schedule group</strong>
+ARN; AWS does not accept a specific schedule ARN for this trust condition.
+If the guard cannot be created, terminate the new instance before continuing.
+Scheduler operates at minute precision and API retries can delay termination;
+retain normal job cleanup and the existing independent ad hoc sweeper as well.
+Remove the temporary key, schedule, and role only after termination is verified.</p>
+<p>An ordinary RHEL AMI initially boots without FIPS mode. For the disposable probe,
+enable it with <code>sudo fips-mode-setup --enable</code>, reboot, and verify both
+<code>fips-mode-setup --check</code> and <code>/proc/sys/crypto/fips_enabled</code> before building:</p>
+<pre><code class="language-sh"># Inside the disposable RHEL 9 guest, after the FIPS reboot:
+sudo bash scripts/rhel-fips-ec2-probe.sh /var/tmp/zc-fips-probe
+</code></pre>
+<p>The x86_64 probe installs a pinned vendor package set from Red Hat's public UBI
+repository, checking download hashes and requiring RPM signature verification.
+It uses OpenSSL 3.2.2-6.el9_5.1 with provider/provider-so 3.0.7-6.el9_5, prevents
+the compiler/runtime installation from replacing that OpenSSL set, and verifies
+both provider packages, including the package containing the actual module.
+It builds a small C program and tests SHA-256, random generation, and rejection
+of an MD5 fetch with <code>fips=yes</code>. The active module must report version
+<code>3.0.7-395c1a240fbfffd8</code>, which Red Hat maps to certificate 4857.</p>
+<p>The probe repeats the program inside a UBI 9.6 container pinned by digest and
+checks Podman's automatic FIPS policy. The output contains the executable,
+source, hashes, vendor RPMs, package/module versions, container identity, and a
+JSON report. It does not build zcutils or exercise a GitHub Actions runner.
+This package set is a reproducible module experiment; selecting maintained
+packages for a production release remains a vendor-support and certificate
+mapping decision.</p>
+<p>The initial EC2 test found that installing the current default repository
+packages selected OpenSSL 3.5.5 and provider 3.0.7-11.el9_8, whose active module
+reported <code>3.0.7-cda111b5812c30d4</code>. The probe rejected that version instead of
+treating its FIPS mode as certificate evidence. Newer OpenSSL libraries also
+require the newer provider packaging, so pinning only the provider is insufficient
+for this particular experiment. Algorithm-test listings for another module
+version do not establish a CMVP module-certificate mapping.</p>
+<p>The 2026-09-13 EC2 smoke run passed on a subscription-included RHEL 9.6
+<code>m6i.large</code> (2 vCPUs, 8 GiB). Both host and container reported the required
+provider version and passed the program's checks. The artifact was downloaded
+and its hashes verified. After moving the independent schedule forward, AWS
+terminated the instance at the requested time; the temporary instance, disk,
+network, SSH key, schedule, and role were cleaned up. Local evidence and the
+one-off orchestration scripts are under <code>target/fips-ec2-smoke/</code>, with the
+combined result in <code>report.json</code>. GitHub runner registration and a full CSI
+build were not part of this smoke run.</p>
+<p>For a production runner image, provision according to Red Hat's FIPS guidance
+and ensure workload keys are created after FIPS is active. Switching the lab AMI
+after first boot does not retroactively establish how pre-existing keys were
+generated. A tested provider version and a kernel flag alone do not establish
+approved use for every operation or coverage of an EC2 operational environment.</p>
+<p>The <a href="../../deploy/github-ec2-runner/README.html">Terraform bootstrap</a> provisions the OIDC
+controller role, restricted Scheduler role/group, and a separate nondefault
+public VPC for these workers. It creates no EC2 instances or per-run schedules.
+Its example allows the pinned RHEL AMI and <code>m6i.large</code> in <code>us-east-1</code>; it does
+not change the default or ad hoc HPC networks. The empty stack has no standing
+hourly charge; workers allocate public IPs and disks only at runtime.</p>
+<p>The GitHub Actions integration can use three jobs:</p>
+<ol>
+<li>A controller job assumes a restricted AWS IAM role using GitHub OIDC, launches
+the RHEL instance, establishes its independent termination schedule, verifies
+host mode, and registers a runner with a unique label for this workflow run.</li>
+<li>The build job targets that label, runs the provider and application checks,
+and uploads its artifact, logs, package inventory, image digest, and evidence
+using <code>actions/upload-artifact</code> before the runner exits.</li>
+<li>A controller cleanup job with <code>if: always()</code> terminates the exact instance and
+removes its runner registration and temporary resources. The AWS schedule
+remains the fallback when GitHub is canceled or unavailable.</li>
+</ol>
+<p>Register the worker as an ephemeral or just-in-time runner so it accepts one job.
+Runner deregistration does not destroy EC2. Use a GitHub App or other suitably
+scoped registration credential; AWS OIDC credentials alone cannot register a
+GitHub runner. Keep the App private key on the controller and deliver only the
+short-lived registration material to the worker. Restrict AWS trust to the
+actual repository/ref or protected environment OIDC subject, and restrict
+<code>iam:PassRole</code> to the intended worker/termination roles. Allow only trusted
+workflows onto this runner; do not expose its credentials to arbitrary fork jobs.
+The worker does not need the controller's EC2 launch or IAM administration rights.</p>
+<p>This gives us a disposable FIPS-enabled build/test host. The application still
+needs the module mapping and approved-service work listed below; running a Rust
+build on RHEL does not redirect its embedded AWS-LC crypto to Red Hat OpenSSL.</p>
+<p>References:</p>
+<ul>
+<li><a href="https://aws.amazon.com/partners/redhat/faqs/">AWS RHEL subscription and billing FAQ</a></li>
+<li><a href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/security_hardening/switching-rhel-to-fips-mode_security-hardening">Red Hat FIPS activation and container guidance</a></li>
+<li><a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws">GitHub OIDC with AWS</a></li>
+<li><a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners">GitHub ephemeral runner lifecycle</a></li>
+<li><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/managing-targets-universal.html">Scheduler universal API targets</a></li>
+<li><a href="https://docs.aws.amazon.com/scheduler/latest/UserGuide/cross-service-confused-deputy-prevention.html">Scheduler execution-role trust conditions</a></li>
+</ul>
+<h2 id="openshift">OpenShift</h2>
+<p>Actual FIPS-enabled OpenShift needs an OpenShift pull secret, an appropriate
+RHEL FIPS installer environment, <code>fips: true</code> <strong>before installation</strong>, and
+RHCOS/RHEL nodes. An ordinary OKD or CRC cluster is not substituted. The existing
+<code>scripts/okd-sno-qemu.sh</code> remains an independent non-FIPS compatibility lab.</p>
+<p>Provision the OpenShift cluster using its version's supported installation
+procedure and cluster networking; the standalone guest runner's SSH-only user
+network is not an OpenShift cluster installer. An outer Debian host can run the
+VMs; run the OpenShift installation program inside the required RHEL environment.</p>
+<p>Install the candidate CSI chart by digest with the correct kernel bundle and
+the cluster's required SCC permissions. This document does not approve ordinary
+upstream CSI sidecar images for a FIPS release. Then collect read-only evidence:</p>
+<pre><code class="language-sh">python3 scripts/fips-qemu-lab.py openshift --context local-fips-openshift \
+  --namespace zcblock-csi --image-digest sha256:&lt;manifest-digest&gt; \
+  --report /tmp/fips-openshift.json
+</code></pre>
+<p>Every node must have one running selected CSI pod. Mixed architectures require
+separate per-architecture checks/digests or an extension to the report format;
+the present command expects one platform manifest digest. Missing pods, wrong
+digests, non-RHEL nodes, and failed provider checks fail the command.</p>
+<h2 id="acceptance-check-suite">Acceptance check suite</h2>
+<p><code>scripts/fips-acceptance.py</code> implements three release gates. Run <code>check</code> on the
+actual deployment node (or inside the guest being assessed), with local Podman
+and Python 3.9 or newer. It never starts EC2 instances or changes host FIPS mode.
+It inspects the image once and uses its immutable ID for every subsequent run.
+FAIL and missing evidence (BLOCKED) both exit <strong>1</strong>. Only a complete acceptance
+record exits <strong>0</strong>; that is a project acceptance decision, not a CMVP certificate.</p>
+<div class="table-scroll"><table><thead><tr><th>Gate</th><th>Automated evidence</th><th>Required reviewed evidence</th></tr></thead><tbody>
+<tr><td>Module</td><td>Current CMVP status and sunset; exact runtime module identity in all 16 executables; original vendor archive hash and source-tree comparison; binary hashes and static identity symbols; source/build-recipe binding; native FIPS options and tool versions</td><td>Security Policy build/link procedure, including any generated source, symbol-prefix changes, compiler options and module boundary considerations</td></tr>
+<tr><td>Services</td><td>Module self-tests and integrity test in each executable; approved-service counters for SHA-256, HMAC, RNG and AES-GCM; rejection of modified ciphertext; negative controls for external-nonce GCM and standalone SHA-256; real application RNG, key derivation and native/RPC frame operations; dependency/feature and source inventory</td><td>Complete security-service map, including actual TLS configurations, legacy CSI/tonic TLS reachability, key/nonce/entropy rules, signatures, optional features, and non-security checksum dispositions</td></tr>
+<tr><td>Operation</td><td>Actual node OS, container OS, kernel FIPS mode, boot identity, virtualization, hardware identity and the selected platform list</td><td>Operating procedures and deployed workload/sidecar scope, including entropy, key lifecycle, failure handling and restrictions in the Security Policy</td></tr>
+</tbody></table>
+</div>
+<p>The initial profile is
+<a href="../../assets/repository/zccusan/deploy/zcblock-csi/fips/acceptance-5314.json"><code>fips/acceptance-5314.json</code></a>, a <strong>candidate target</strong>
+based on <a href="https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314">CMVP certificate #5314</a>
+and its <a href="https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp5314.pdf">Security Policy</a>.
+It expects AWS-LC FIPS 3.1.0, Amazon Linux 2023 userspace, and one of the listed
+bare-metal platforms. It does not silently extend that coverage to UBI/RHEL,
+Ubuntu, OpenShift, virtual EC2 instances or QEMU. Requiring the node FIPS flag is
+an additional project deployment rule. Portability or a different vendor module
+needs a separately reviewed profile and policy basis.</p>
+<p>The FIPS build pins <code>aws-lc-rs = 1.15.3</code> and the FIPS 3.1 ABI at
+<code>aws-lc-fips-sys = 0.13.11</code>. A local provider adapter replaces that sys crate's
+native build while preserving its Rust API. It contains no AWS-LC source and
+requires the unmodified <code>libcrypto.a</code> produced by the certificate 5314 section
+11.1 commands. Ordinary Cargo builds fail closed unless
+<code>AWS_LC_FIPS_SYS_SYSTEM_DIR</code> points at a valid provider package.</p>
+<p>The concrete <a href="../../deploy/zcblock-csi/fips/AWS-LC-RECOMPILATION.html">AWS-LC recompilation guide</a> provides
+a checked runner for the literal section 11.1 native build and packages its
+output without rebuilding it. The adapter verifies the provider receipt and
+artifact hashes, uses the exact upstream 0.13.11 bindings with unprefixed
+symbols, and statically links the recorded library. Acceptance rejects Cargo
+CMake output, prefixed AWS-LC symbols, dynamic crypto libraries, receipt/hash
+mismatches, and provider builds outside a certificate-listed environment.
+The adapter and boundary still require qualified review; passing the mechanical
+checks does not itself grant certificate coverage.</p>
+<p>FIPS builds now use module RNG, SP 800-108 Counter HMAC-SHA256 key derivation,
+and the module's internally generated GCM IV service. The application probe
+isolates encryption from key derivation to prevent a successful KDF from
+masking a non-approved encryption call. See <a href="../../deploy/zcblock-csi/fips/CRYPTO-INTEGRATION.html">the crypto integration guide</a>
+for wire versions, migration, coverage and outstanding deployment evidence.</p>
+<p>For a local assessment, including an explicit BLOCKED result for the skipped
+online certificate check:</p>
+<pre><code class="language-sh">python3 scripts/fips-acceptance.py check \
+  --image localhost/zcblock-csi-fips-ubi9:dev \
+  --offline \
+  --report target/fips-acceptance/report.json
+</code></pre>
+<p>Add <code>--storage /tmp/zc-fips-podman</code> when using the existing isolated local image
+store. The normal online check only contacts the CMVP certificate page. Supply
+the original archive identified by section 11.1 with
+<code>--validated-source /path/to/AWS-LC-FIPS-3.1.0.zip</code>; hashing and source comparison
+do not extract or execute its contents. Missing archives block acceptance.</p>
+<p>Each run writes a JSON report and a neighboring <code>*.review-template.json</code>. The
+template is intentionally incomplete. A qualified reviewer must supply their
+name, review/expiry dates, dispositions and rationales for every inventory
+finding, and four actual review documents under the review bundle directory:
+<code>build_procedure</code>, <code>crypto_service_map</code>, <code>operating_policy</code>, <code>deployment_scope</code>.
+Each document entry has a relative <code>path</code> and its <code>sha256</code>. The record binds the
+image ID/digest, source, build receipt, profile and node environment. Changed
+inputs, omitted findings, altered documents, or expired reviews fail. The
+reviewer sets the explicit expiry under the applicable assessment policy; the
+checker does not impose a maximum duration.</p>
+<p>Each run also writes <code>*.service-review-template.json</code> when the image contains
+its structural inventory. Complete its exact-image/source TLS and dependency
+findings, operating records and aggregate GCM key budgets as described in
+<a href="../../deploy/zcblock-csi/fips/CRYPTO-INTEGRATION.html">the crypto integration guide</a>. Pass it with
+<code>--service-review /path/to/service-review.json</code>. Missing records block service
+and operational acceptance; collection and arithmetic checks alone do not
+establish semantic coverage or distributed usage bounds.</p>
+<p>Pass the completed record with <code>--review /path/to/review.json</code>. Review records
+and policy profiles must be controlled by trusted repository/CI review: a name
+in JSON is <strong>not</strong> signature verification or independent accreditation. The
+checker does not validate a review document's reasoning. Known code failures,
+bad module versions, unsupported environments and failed tests cannot be
+overridden by a review record. The source inventory is conservative; an empty
+scan is not proof that all cryptography has been found.</p>
+<p>The image build now embeds <code>/usr/share/zcutils/fips/build-receipt.json</code>. It
+contains hashes of the actual source and executables, the resolved dependency
+features, application toolchain, provider receipt and final static-link
+evidence. The provider receipt separately binds the literal module build,
+native toolchain, complete source manifest, <code>libcrypto.a</code>, and <code>bcm.o</code>.
+Missing or mismatched receipts require rebuilding.</p>
+<p>For a build that must pass acceptance before the wrapper returns success:</p>
+<pre><code class="language-sh">FIPS_ACCEPTANCE=1 \
+FIPS_VALIDATED_SOURCE=/path/to/AWS-LC-FIPS-3.1.0.zip \
+FIPS_ACCEPTANCE_REVIEW=/path/to/review.json \
+FIPS_ACCEPTANCE_SERVICE_REVIEW=/path/to/service-review.json \
+FIPS_DISTRO=amzn2023 \
+FIPS_PROVIDER_ROOT=zccusan/deploy/zcblock-csi/fips/provider \
+  zccusan/deploy/zcblock-csi/build-fips-image.sh
+</code></pre>
+<p>UBI and Ubuntu compatibility builds exit nonzero under the selected
+certificate-5314 environment profile. A release/publish job must require the
+acceptance exit status and retain its report with the exact image digest.</p>
+<p><code>&lt;shipped-executable&gt; --fips-evidence</code> runs the bounded module controls before
+CLI/service startup. <code>zcutils --fips-application-evidence</code> calls the real shared
+library's native and RPC crypto functions with disposable, in-memory data. The
+controls deliberately include non-approved operations and belong in a separate
+diagnostic process. A changed service counter only proves that an approved
+service ran during that call; mixed operations still need the reviewed service
+map. The application checks isolate native encryption from key derivation to
+prevent an approved KDF masking a non-approved encrypt operation.</p>
+<p>These checks use no application secrets, network, devices or writable mounts.
+Containers are read-only, have resource/time limits and are removed by their
+own container IDs, including on timeout. Functional storage and TLS handshake
+acceptance, cluster sidecars and operating procedures remain separate evidence
+requirements; a provider test does not establish those facts.</p>
+<p>Run the regression tests with:</p>
+<pre><code class="language-sh">python3 -m unittest discover -s scripts -p 'test_fips*.py' -v
+</code></pre>
+<p><code>.github/workflows/fips-acceptance-tests.yml</code> runs those regressions on pull
+requests and manual dispatch. Its successful fixtures are synthetic and test
+the decision logic only. GitHub-hosted CI passing these tests is not acceptance
+of a FIPS deployment. The existing QEMU and OpenShift lab checks continue to
+report runtime compatibility and mode; this stricter suite is the acceptance
+gate.</p>
+<p>The acceptance implementation, structural service checker and its tests,
+certificate profile, and AWS-LC recompilation guide have a combined SHA-256 review stamp in the header of
+<code>scripts/test_fips_acceptance.py</code>. That header also contains the normalized
+test-file SHA-256 and review date. The test normalizes only those three comment
+values to avoid a self-referential digest, verifies both hashes, and requires a
+matching latest entry in <code>fips/acceptance-review-history.json</code>. When criteria
+or tests change, append a review entry with a later UTC timestamp and update all three
+header values after reviewing that every changed criterion has a corresponding
+test. Do not rewrite prior review entries.</p>
+<h2 id="remaining-validation-gates">Remaining validation gates</h2>
+<ul>
+<li>Obtain qualified review of the custom Rust FFI adapter, static link, module
+boundary, and exact provider/build receipt against certificate 5314 and its
+current Security Policy.</li>
+<li>Audit approved services: native AES-GCM nonce management, standalone <code>sha2</code>
+key derivation/hashing, direct OS randomness, signing, and older TLS dependencies.
+The current feature does not replace those paths or establish their approval.</li>
+<li>Audit all sidecars and enabled transports, then run full storage/replication
+acceptance on each intended image/node combination.</li>
+<li>Record package/module versions, image digest, node OS/kernel/architecture,
+hypervisor conditions, module certificate, and approved configuration together.</li>
+</ul>
+<p>Sources checked 2026-09-12:</p>
+<ul>
+<li><a href="https://docs.rs/rustls/0.23.43/rustls/manual/_06_fips/index.html">rustls FIPS integration</a></li>
+<li><a href="https://github.com/aws/aws-lc/blob/main/crypto/fipsmodule/FIPS.md">AWS-LC build and validation information</a></li>
+<li><a href="https://documentation.ubuntu.com/security/compliance/fips/how-to-install-ubuntu-with-fips/">Ubuntu FIPS installation</a></li>
+<li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html-single/installation_configuration/installation_configuration">OpenShift installation requirements</a></li>
+<li><a href="https://access.redhat.com/compliance/fips">Red Hat validation inventory</a></li>
+</ul>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#image-variants">Image variants</a><a href="#debian-outside-genuine-fips-guests-inside">Debian outside, genuine FIPS guests inside</a><a href="#temporary-rhel-runners-on-ec2">Temporary RHEL runners on EC2</a><a href="#openshift">OpenShift</a><a href="#acceptance-check-suite">Acceptance check suite</a><a href="#remaining-validation-gates">Remaining validation gates</a></nav></div></body></html>

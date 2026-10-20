@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Lane/flow scheduler · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="laneflow-scheduler">Lane/flow scheduler</h1>
+<p><code>src/gang_scheduler.rs</code> is a deterministic control-plane scheduler. It reads an
+indexed estate event stream and assigns flows to contention lanes. It does not
+run a data-path thread, issue storage I/O, or make a per-I/O scheduling decision.
+Production workers consume its prepare/commit plans and update lane-local HTB
+targets outside the hot path.</p>
+<h2 id="flow-lane-gang-and-arena">Flow, lane, gang, and arena</h2>
+<p>A <strong>flow</strong> is an end-to-end obligation, such as one volume's steady I/O or one
+volume's recovery replay. A flow can traverse several <strong>lanes</strong>: local mux,
+inter-region transport, targeted demux, and terminal userspace leaf lanes. A
+lane is therefore a resource assigned to flows, not another name for a flow.</p>
+<p>Gang and arena describe coordination over flow-to-lane assignments:</p>
+<ul>
+<li><code>gang</code> admits a broad atomic unit. It minimizes control-plane transactions,
+but one failed participant aborts the entire unit.</li>
+<li><code>arena</code> admits independent single-volume flows. A failed participant only
+unwinds its own assignment. Arena-only mode refuses multi-volume recovery or
+consistency work rather than silently weakening it.</li>
+<li><code>hybrid</code> uses narrow arena admission for independent flows and gangs only for
+declared recovery groups, snapshot cuts, and similar atomic boundaries. It is
+the default.</li>
+</ul>
+<p>All modes use the same idempotent prepare, commit, and abort protocol. “Arena”
+does not mean partial commit of an operation that promised atomicity.</p>
+<h2 id="recovery-scheduling">Recovery scheduling</h2>
+<p>Recovery planning considers all flows converging on a destination together.
+Each accepted recovery reserves:</p>
+<ul>
+<li>steady terminal bytes and IOPS on explicit host lanes;</li>
+<li>a place in the destination's aggregate recovery queue;</li>
+<li>every durable mux/demux path used to materialize the flow;</li>
+<li>pipeline fill latency, demux byte and operation rates, target copy/apply rate,
+and unavoidable payload copies.</li>
+</ul>
+<p>The next flow sees those reservations, so ten flows do not each claim the whole
+region's restore bandwidth. <code>RecoveryTiming</code> exposes queue start, demux time,
+target materialization time, completion, deadline, whether the RTO is met,
+transport kinds, and copy accounting. Work that misses its RTO can still be
+restored; the missed objective remains explicit instead of making the data
+permanently unschedulable.</p>
+<p><code>PreapprovedFailoverRule</code> selects a target or <code>hold_durably</code> from the current set
+of unavailable regions. The most-specific rule wins. This supports, for
+example, <code>us-east-1 -&gt; us-east-2</code>, then <code>us-east-1 + us-east-2 -&gt; eu-west-1</code> for
+critical flows while lower-value flows remain in durable multiplexed backlog.
+An in-flight destination loss aborts unfinished assignments; already committed
+flows and unfinished flows are re-evaluated from their different current state.</p>
+<p><code>preview_disaster</code> evaluates single-loss, multiple-loss, and very-bad-day failure
+sets without mutating authoritative state. It uses the same planner as a live
+failover, not a separate capacity calculator.</p>
+<h2 id="slo-and-impact-inputs">SLO and impact inputs</h2>
+<p>The scheduler does not accept a user-defined numeric recovery priority class.
+It derives ordering from:</p>
+<ul>
+<li>RPO and RTO;</li>
+<li>current durable and applied HWMs;</li>
+<li>a solution-level estimate of downtime cost rate, one-time RTO breach cost,
+and cost per lost committed operation;</li>
+<li>the currently feasible lane/flow routes and their completion estimates.</li>
+</ul>
+<p><code>ScenarioBusinessImpactRule</code> can override both RTO and impact for a failure set.
+This lets a same-country inter-region outage carry a tight, reputationally costly
+objective while a true global disaster has a three-hour objective because the
+business context is already radically different. Ambiguous equally specific
+rules are deferred rather than resolved by an arbitrary tie-break.</p>
+<h2 id="zero-copy-and-transport-assumptions">Zero copy and transport assumptions</h2>
+<p>Every mux path declares its transport and copy passes. Copy passes are charged
+against a measured copy bandwidth and appear in recovery timing. A zero-copy
+assignment means buffer ownership can pass to the next userspace stage without
+a CPU payload copy; it does not claim that bytes bypass NIC DMA or terminal
+media I/O.</p>
+<p>Cross-region paths should normally be modeled as TCP. TCP may still use shared
+registered arenas and zero-copy send/receive facilities where the actual stack
+supports them. RDMA is an explicit option, never an assumed cross-region
+property, and the principal multi-loss test uses TCP plus shared-arena demux.</p>
+<h2 id="federal-repatriation-4x-design-envelope">Federal-repatriation 4x design envelope</h2>
+<p><code>FEDERAL_REPATRIATION_4X_DESIGN_ENVELOPE_V1</code> is the common scalability
+baseline for design decisions. It is a deliberately conservative engineering
+envelope, not a claim that an authoritative census of federal applications,
+databases, cloud bytes, or objects exists. In particular, GAO says agencies do
+not consistently track cloud costs and savings, so cloud byte counts inferred
+from spending would provide false precision.</p>
+<p>Public anchors for the estimate are:</p>
+<ul>
+<li>GAO counted about <a href="https://www.gao.gov/products/gao-24-106693">6,700 federal IT investments in FY
+2024</a>.</li>
+<li>Data.gov currently exposes hundreds of thousands of <a href="https://catalog.data.gov/dataset?organization_type=Federal+Government">federal public
+datasets</a>,
+which excludes most internal and classified state.</li>
+<li>OPM's official workforce source reports roughly <a href="https://data.opm.gov/">two million federal civilian
+employees</a>; it excludes important populations such as
+many contractors and parts of the national-security estate.</li>
+<li>Major agencies obligated about <a href="https://www.gao.gov/assets/gao-23-106247.pdf">$7 billion on cloud contracts in FY
+2022</a>, including about $3
+billion by DOD, but the source does not report stored bytes.</li>
+<li>NASA alone projected a <a href="https://science.nasa.gov/wp-content/uploads/2023/04/5_Big_Data_Earth_Science_tagged.pdf?emrc=8c801c">328.2 PB EOSDIS archive in
+2025</a>.</li>
+</ul>
+<p>The version-1 estimate turns those anchors into simple, inspectable
+assumptions:</p>
+<ol>
+<li>One estimated federal estate is 100,000 logical applications: approximately
+15 deployable systems/components per reported IT investment, rounded.</li>
+<li>Every application has dev, staging, and production. Twenty percent are
+treated as publicly available and additionally average 20 developer sandbox
+environments. That gives 700,000 deployed application environments before
+the 4x multiplier and 2.8 million after it.</li>
+<li>Modern applications normally own one volume, while database clusters,
+object services, logs, and legacy pools raise the estate average to about
+4.3 volumes per deployed environment. The 4x target is 12 million managed
+volumes.</li>
+<li>Developer clones count as distinct database and volume control-plane
+objects even when copy-on-write makes their physical byte cost initially
+small. The target is 8 million logical databases and 24 million explicit
+database-to-volume memberships.</li>
+<li>Repatriated S3-like services count as deployed application environments and
+their backing pools count as ordinary managed volumes. Buckets and objects
+remain inside those services and are intentionally absent from the storage
+scheduler's model.</li>
+<li>The estimated federal estate carries 25 EB of logical database, VM, object
+pool, log, and file state. This is an explicit capacity hypothesis rather
+than an inferred public-cloud byte count. The 4x target is 100 EB logical and
+350 EB physical after a planning factor of 3.5 for replicas/erasure coding,
+journals, snapshots, rebuild reserve, and stranded capacity. At 100 TB
+usable per storage host this is 3.5 million hosts.</li>
+</ol>
+<p>The complete 4x envelope is therefore:</p>
+<div class="table-scroll"><table><thead><tr><th>Dimension</th><th style="text-align: right">Target</th></tr></thead><tbody>
+<tr><td>Business/administrative entities</td><td style="text-align: right">128</td></tr>
+<tr><td>Administrative regions</td><td style="text-align: right">512</td></tr>
+<tr><td>Failure-domain sites</td><td style="text-align: right">1,024</td></tr>
+<tr><td>Storage hosts</td><td style="text-align: right">3,500,000</td></tr>
+<tr><td>Logical applications</td><td style="text-align: right">400,000</td></tr>
+<tr><td>Deployed application environments</td><td style="text-align: right">2,800,000</td></tr>
+<tr><td>Managed volumes</td><td style="text-align: right">12,000,000</td></tr>
+<tr><td>Logical databases</td><td style="text-align: right">8,000,000</td></tr>
+<tr><td>Database-to-volume memberships</td><td style="text-align: right">24,000,000</td></tr>
+<tr><td>Authoritative relationship edges, including DB-volume memberships</td><td style="text-align: right">50,000,000</td></tr>
+<tr><td>Logical data</td><td style="text-align: right">100 EB</td></tr>
+<tr><td>Planned physical media</td><td style="text-align: right">350 EB</td></tr>
+</tbody></table>
+</div>
+<p>This envelope requires partitioned ownership. No production component may
+load the global estate into one <code>BTreeMap</code>, run an O(global-estate) placement
+pass, maintain a per-I/O global counter, or put every object through Raft.
+Regions own sharded volume/application state and publish compact capacity and
+policy summaries upward. Atomic snapshots use a hierarchy of immutable cuts
+and bounded prepare groups instead of one 12-million-member transaction.
+Disaster scheduling is proportional to the affected partition and consumes
+precomputed placement alternatives; global policy reconciliation remains off
+the lane-local data path.</p>
+<p>The concrete ownership, partitioning, relationship-directory, scaled-model,
+and cross-shard commit rules are specified in
+<a href="../../reference/docs/estate-sharding-contract.html"><code>estate-sharding-contract.md</code></a>.</p>
+<h2 id="tests">Tests</h2>
+<p>The module's deterministic tests cover:</p>
+<ul>
+<li>Cassandra JBOD, CockroachDB, Postgres data/WAL, a storage-durable sharded DB,
+MinIO, and Kafka in an evolving four-region estate;</li>
+<li>increasingly broad same-region and cross-region consistency snapshots;</li>
+<li>live business-impact changes, regional failover, capacity-short resize, and
+capacity growth;</li>
+<li>gang/arena/hybrid failure-isolation bakeoff;</li>
+<li>converged recovery into insufficient capacity, dry-run disaster previews,
+durable mux backlog, a destination loss during replay, targeted TCP demux,
+explicit hold behavior, and scenario-specific three-hour global RTOs;</li>
+<li>exact event/decision/state replay; and</li>
+<li>1,000 interrelated applications and 1,199 physical volumes without worker
+threads or storage allocation: a low-impact legacy development cluster with
+2,000 logical databases spread over 200 pool volumes (10--50 databases per
+volume), 400 legacy consumers, four high-criticality database volumes, and
+595 newer one-volume services. Named workflow edges and an evolved
+estate-wide cut exercise transitive consistency while impact aggregation
+proves raw database count does not outrank dedicated high-criticality state.</li>
+</ul>
+<p>These are control-plane model tests. They do not establish data-path IOPS or
+latency and must not be reported as such.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#flow-lane-gang-and-arena">Flow, lane, gang, and arena</a><a href="#recovery-scheduling">Recovery scheduling</a><a href="#slo-and-impact-inputs">SLO and impact inputs</a><a href="#zero-copy-and-transport-assumptions">Zero copy and transport assumptions</a><a href="#federal-repatriation-4x-design-envelope">Federal-repatriation 4x design envelope</a><a href="#tests">Tests</a></nav></div></body></html>

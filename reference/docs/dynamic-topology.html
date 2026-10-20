@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Dynamic topology and durability ownership · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="dynamic-topology-and-durability-ownership">Dynamic topology and durability ownership</h1>
+<p>Topology is a committed change stream, not a static placement DSL. The
+userspace control plane applies atomic <code>CommittedTopologyBatch</code> transactions;
+each transaction advances a topology epoch and is replayed from the shared
+<code>ChangeLogStore</code>. The <code>/dev/zcnblk0</code> client edge never interprets these facts or
+makes placement decisions.</p>
+<h2 id="characteristics">Characteristics</h2>
+<p>An entity or relationship carries arbitrary typed JSON characteristics. Common
+facts include:</p>
+<pre><code class="language-text">cloud.provider
+cloud.region
+cloud.availability_zone
+cloud.availability_zone_id
+cloud.placement_group
+failure.region
+failure.az
+failure.host
+failure.rack
+durability.role
+</code></pre>
+<p><code>UpsertEntity</code> establishes a complete entity. <code>PatchEntityCharacteristics</code>
+atomically sets and removes selected facts without discarding facts learned by
+another source. Applications submit these commands through the metadata Raft
+runtime; <code>TopologyStore</code> is the committed application-state-machine sink and
+does not itself claim to be a Raft implementation.</p>
+<h2 id="permissionless-ec2-discovery">Permissionless EC2 discovery</h2>
+<p><code>zctopology-detect</code> queries only the local EC2 IMDSv2 endpoint. It needs no IAM
+role and makes no AWS API call:</p>
+<pre><code class="language-bash">zctopology-detect \
+  --set durability.role=hop \
+  --set failure.rack='"rack-7"'
+
+ZC_TOPOLOGY_CHARACTERISTICS='durability.role=leaf,failure.foo="bar"' \
+  zctopology-detect
+</code></pre>
+<p>Values are JSON when parseable and strings otherwise. A <code>null</code> override removes
+a discovered fact. Region, AZ, stable AZ ID, placement group, instance identity,
+instance type, and local IPv4 are detected when IMDS exposes them. Optional
+facts such as placement group remain absent instead of making discovery fail.</p>
+<h2 id="policy-and-movement">Policy and movement</h2>
+<p>A <code>DurabilityObligation</code> describes minimum copies, minimum role counts, and
+minimum distinct values for any named characteristic. For example, two copies
+may require one <code>hop</code>, one <code>leaf</code>, and two distinct <code>failure.host</code> values.</p>
+<p>Custody is fenced by log identity, incarnation, term, and topology epoch. A
+replacement begins <code>staged</code>, catches up to an explicit per-lane HWM, and
+becomes <code>active</code> only after its userspace data stage reports that HWM durable.
+Copy activation retains the source; move activation marks it
+<code>pending_release</code>. A controller can also prepare a later release explicitly.
+In every case source release is rejected unless remaining available witnesses,
+excluding the source itself, satisfy the obligation at the requested HWM.
+Released custody and its completed handoffs can then be retired before the
+unused entity is removed.</p>
+<p><code>EvolutionController</code> provides these policy-neutral phases. It does not embed
+a static topology DSL: higher-level controllers choose placements from the
+current typed facts, then commit stage, activation, release, fact patch, and
+retirement transactions. A node with <code>health.available=false</code> is excluded
+from durability coverage. Failed controller transactions leave both the
+in-memory state and durable change log unchanged.</p>
+<p>Metadata voters do not count as payload copies merely because they know a HWM.
+A small Raft tiebreaker can vote without owning the data WAL.</p>
+<p>The proposed <a href="../../reference/docs/wal-custody-tiers.html">WAL custody tier model</a> extends these
+obligations to memory holders, protected memory, geographic forwarding,
+overflow, and recovery coverage for successive regional failures.</p>
+<h2 id="qemu-topology-evolution-proof">QEMU topology-evolution proof</h2>
+<p><code>scripts/zctopology-evolution-qemu.sh</code> builds a minimal initramfs and launches
+six 192 MiB, one-vCPU VMs: five userspace replica/tier stages and one metadata
+controller. Replica HWMs are exchanged over TCP; each target writes, syncs,
+and atomically installs its local state before replying. The controller VM
+commits activation only after receiving that reply. No block device is used as
+a placement, mirror, stripe, or spill primitive.</p>
+<p>The harness starts with a hot region-A replica and cold region-B replica. Its
+three logical supervisor voters are separate from the two initial payload
+witnesses. It physically lowers host TAPs, rather than changing an in-process
+health flag. It performs and verifies:</p>
+<ol>
+<li>isolated 2-of-3 supervisor quorum loss rejects both HA and topology commits
+without advancing either durable revision;</li>
+<li>an application-consistent snapshot at sequence 4 on two data replicas;</li>
+<li>a named recovery point at sequence 6, based on the snapshot, while retaining
+later destructive mutations at sequences 7 and 8;</li>
+<li>region-A data loss causes durability coverage to fail closed;</li>
+<li>overlapping loss of both data sources and supervisor quorum rejects recovery
+and all metadata/topology commits atomically;</li>
+<li>after partial restoration, region C restores the sequence-4 snapshot, replays
+only WAL records 5 and 6, and verifies the resulting SHA-256 digest before
+custody activation; records 7 and 8 are proven absent;</li>
+<li>recovered region-C custody is certified with region B in a higher metadata
+term and configuration epoch;</li>
+<li>hot promotion, online replacement, and cost-driven contraction; and</li>
+<li>exact topology and PITR metadata replay after reopening both committed logs.</li>
+</ol>
+<p>The latest 2026-08-16 run completed 19 atomic topology epochs with two active
+copies in two live regions. The snapshot cut was 4, recovery cut was 6, and the
+recovered payload digest was
+<code>sha256:ff599e97ef880f6d3bb103e258988eec1513c389762bbee13fc3732bd02fdd66</code>.
+Logs are in <code>bench-results/zctopology-evolution-qemu-20260816T142626Z/</code>. This is a
+correctness/failure-injection proof, not an IOPS benchmark; the topology
+manifest marks it non-representative and reports no performance number.</p>
+<h2 id="ec2-architecture-measurements-2026-08-16">EC2 architecture measurements, 2026-08-16</h2>
+<p>These are TCP metadata transport/load measurements with 64-byte payloads and
+one ACK per record. They are not block IOPS, persistent-media results, or proof
+of elections. All nodes were in <code>us-east-2c</code>; each result is three repeated runs.</p>
+<div class="table-scroll"><table><thead><tr><th>Layout</th><th style="text-align: right">Majority records/s, mean</th><th style="text-align: right">Range</th><th style="text-align: right">Raw RTT</th></tr></thead><tbody>
+<tr><td>One c8gn.48xlarge tier leader + one c8gn.48xlarge peer</td><td style="text-align: right">246,246</td><td style="text-align: right">211,411–302,498</td><td style="text-align: right">45 us</td></tr>
+<tr><td>Two c8gn.48xlarge tier voters + one t4g.nano tiebreaker</td><td style="text-align: right">516,374</td><td style="text-align: right">447,442–587,161</td><td style="text-align: right">tier 45 us, tiny 222 us</td></tr>
+<tr><td>Three c8g.large voters</td><td style="text-align: right">1,095,444</td><td style="text-align: right">1,084,535–1,102,947</td><td style="text-align: right">118–208 us</td></tr>
+<tr><td>Three c8g.4xlarge voters</td><td style="text-align: right">1,086,722</td><td style="text-align: right">1,083,217–1,093,024</td><td style="text-align: right">84–159 us</td></tr>
+</tbody></table>
+</div>
+<p>The asymmetric quorum reports the first required follower ACK: with three
+voters, the leader plus either follower is a majority. It still drains and
+reports the slower peer. The test exposed and fixed a leader deadlock in which
+the append stream was written completely before reverse ACKs were drained.
+ACKs are now consumed concurrently with sends.</p>
+<p>The t4g.nano is burstable and these short runs do not establish indefinitely
+sustained CPU-credit performance. <code>raft-leader</code> remains a transport benchmark.</p>
+<p>The persistent runs use <code>raft-durable-leader</code> and
+<code>raft-durable-follower</code>. Every voter writes a sequential file WAL and emits a
+prefix ACK only after <code>fdatasync</code>. Majority completion is the second durable
+completion among three voters, including the leader's local WAL.</p>
+<div class="table-scroll"><table><thead><tr><th>Persistent layout</th><th style="text-align: right">Flush grouping</th><th style="text-align: right">Majority records/s, mean</th><th style="text-align: right">Range</th></tr></thead><tbody>
+<tr><td>Two large tier voters + t4g.nano</td><td style="text-align: right">1 record</td><td style="text-align: right">374</td><td style="text-align: right">373–374</td></tr>
+<tr><td>Two large tier voters + t4g.nano</td><td style="text-align: right">64 records</td><td style="text-align: right">21,598</td><td style="text-align: right">21,038–22,398</td></tr>
+<tr><td>Three c8g.large voters</td><td style="text-align: right">1 record</td><td style="text-align: right">379</td><td style="text-align: right">379–379</td></tr>
+<tr><td>Three c8g.large voters</td><td style="text-align: right">64 records</td><td style="text-align: right">22,573</td><td style="text-align: right">22,572–22,576</td></tr>
+<tr><td>Three c8g.4xlarge voters</td><td style="text-align: right">64 records</td><td style="text-align: right">22,557</td><td style="text-align: right">22,538–22,576</td></tr>
+<tr><td>Large leader + t4g.nano, other large voter unavailable</td><td style="text-align: right">64 records</td><td style="text-align: right">20,999</td><td style="text-align: right">20,977–21,025</td></tr>
+<tr><td>Large tier leader + two c8g.large voters</td><td style="text-align: right">64 records</td><td style="text-align: right">22,573</td><td style="text-align: right">22,570–22,577</td></tr>
+</tbody></table>
+</div>
+<p><code>raft-durable-inspect</code> reopened and structurally validated all nine selected
+leader/follower WALs: each contained 100,000 contiguous frames through index
+100,000 and exactly 9,600,000 bytes. A unit test also proves a truncated final
+frame is rejected. With one configured large follower connection refused, the
+durable leader plus t4g.nano continued as two available voters in a three-voter
+configuration. With both followers unavailable, it returned <code>NotConnected</code>
+instead of publishing a result. Elections and automated leader promotion remain
+a separate gate; these runs prove persistent replicated-prefix, majority-ACK,
+one-peer-loss availability, and no-quorum fail-closed behavior.</p>
+<p>The c8g.large and c8g.4xlarge groups are effectively tied in this workload.
+Adding cores does not improve the single-stream metadata path, so c8g.large is
+the better price/performance voter here. With persistent ACKs, the ceiling is
+the identical gp3 flush cadence rather than voter CPU size.</p>
+<p>Raw logs and discovered facts are under
+<code>bench-results/zcutils-raft-topologies-20260816/</code>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#characteristics">Characteristics</a><a href="#permissionless-ec2-discovery">Permissionless EC2 discovery</a><a href="#policy-and-movement">Policy and movement</a><a href="#qemu-topology-evolution-proof">QEMU topology-evolution proof</a><a href="#ec2-architecture-measurements-2026-08-16">EC2 architecture measurements, 2026-08-16</a></nav></div></body></html>

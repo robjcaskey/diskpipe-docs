@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Reproduced executable bundle: 75c89bd43418 · Diskpipe</title><link rel="stylesheet" href="../../../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../../../index.html">Diskpipe</a><a href="../../../../../kubernetes.html">With Kubernetes</a><a href="../../../../../standalone.html">Without Kubernetes</a><a href="../../../../../day-2.html">Day-two operations</a><a href="../../../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="reproduced-executable-bundle-75c89bd43418">Reproduced executable bundle: 75c89bd43418</h1>
+<p>On 2026-09-15, two separate EC2 workers built revision
+<code>75c89bd4341809db9a2955149e092b8e3f01c8dd</code> with network access disabled during
+native-provider and application compilation. All 16 shipped executables,
+<code>bcm.o</code>, normalized <code>libcrypto.a</code>, and the complete unsigned executable bundle
+matched byte-for-byte. This is a project-run comparison signed by Rob J. Caskey,
+not independent third-party verification or FIPS certification.</p>
+<p>The first <a href="https://github.com/robjcaskey/zcutils/actions/runs/34957392295">build</a>
+also compared online and offline compilation and selected the offline output.
+The second <a href="https://github.com/robjcaskey/zcutils/actions/runs/34960674743">build</a>
+compiled offline only, reusing effective build timestamp <code>1789468959</code> and
+asserting the first bundle's hash before signing or publishing:</p>
+<pre><code class="language-text">afcd58e2676990271f2077540c78403857a220b086dc7cbc79a9150e417bc4fc
+</code></pre>
+<p>The workers shared a retained dependency cache, but compilation used fresh
+targets with network access disabled. This establishes reproduction on separate
+machines with the recorded inputs; it does not test independently sourced
+dependency archives or an entirely air-gapped preparation and signing process.</p>
+<p>The <a href="../../../../../assets/repository/zccusan/deploy/zcblock-csi/fips/reproduced/75c89bd43418/independent-build-comparison.json">comparison</a> records each executable and
+provider hash, compiler identity, source identity, and distinct worker IDs.
+The <a href="../../../../../assets/repository/zccusan/deploy/zcblock-csi/fips/reproduced/75c89bd43418/verification-manifest.json">signed manifest</a> identifies both image digests,
+GitHub runs, effective timestamps, and hashes of the comparison, badge data, and
+<a href="../../../../../assets/repository/zccusan/deploy/zcblock-csi/fips/reproduced/75c89bd43418/cluster-image-policy.json">admission policy</a>. Both builds' detached bundle and
+SBOM signatures were verified against the published signing key. The published
+image signatures and registry SBOM attestations were also checked; their bundle
+hashes agree with the actual downloaded bundles. These checks use a pinned key;
+they do not claim transparency-log inclusion.</p>
+<p>To authenticate the manifest from the repository root, first approve the public
+key through your own trust process, then run:</p>
+<pre><code class="language-sh">result=zccusan/deploy/zcblock-csi/fips/reproduced/75c89bd43418
+cosign verify-blob \
+  --key zccusan/deploy/zcblock-csi/signing-keys/Rob-J-Caskey.pem \
+  --insecure-ignore-tlog \
+  --bundle "$result/verification-manifest.cosign.bundle" \
+  "$result/verification-manifest.json"
+python3 - "$result" &lt;&lt;'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = json.loads((root / 'verification-manifest.json').read_text())
+for name, expected in manifest['files'].items():
+    assert hashlib.sha256((root / name).read_bytes()).hexdigest() == expected, name
+print('Manifest-bound comparison, badge, and policy hashes verified')
+PY
+</code></pre>
+<p>For a new rebuild, download both runs' named build and launch artifacts and use
+the command in <a href="../../../../../deploy/zcblock-csi/fips/REPRODUCIBILITY-ADMISSION.html">Reproduced executables and image admission</a>.
+GitHub build artifacts have a 14-day retention period; archive them before expiry
+if you need the original provider objects, build records, and detached bundles.
+This repository retains the small signed comparison, not those complete archives.
+The <a href="../../../../../deploy/zcblock-csi/IMAGE-VALIDATION.html">image validation guide</a> covers registry
+verification and verification without Cosign.</p>
+<p>The badge applies only to this revision and unsigned executable bundle. The two
+OCI image digests differ. SBOM bytes, OCI metadata, signature envelopes, later
+source revisions, and deployment conformance are outside this comparison.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

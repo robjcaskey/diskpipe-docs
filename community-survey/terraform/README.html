@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>ZCCUSAN Community Survey Stack · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zccusan-community-survey-stack">ZCCUSAN Community Survey Stack</h1>
+<p>This Terraform stack deploys:</p>
+<ul>
+<li>AWS Lambda (Python) ingester for survey payloads.</li>
+<li>HTTP API Gateway endpoint (<code>POST /survey</code>).</li>
+<li>Aurora DSQL single-Region cluster with no provisioned instances or idle DPUs.</li>
+<li>PostgreSQL wire-protocol writes from Lambda using short-lived IAM tokens.</li>
+</ul>
+<p><code>build-lambda-package.sh</code> builds the pinned Psycopg binary wheel for the Lambda
+Python runtime and stages it with the handler and dashboard. Terraform's archive
+provider packages that content-addressed directory, so switching between dev
+and prod state does not create timestamp-only Lambda drift.</p>
+<h2 id="files">Files</h2>
+<ul>
+<li><code>main.tf</code> – Terraform resources for Aurora DSQL + Lambda + API Gateway.</li>
+<li><code>variables.tf</code> – tunables for names, runtime, protection, and table.</li>
+<li><code>outputs.tf</code> – endpoint names and cluster metadata.</li>
+<li><code>lambda/main.py</code> – handler that persists JSON payloads.</li>
+<li><code>lambda/requirements.txt</code> / <code>lambda/pyproject.toml</code> – Python package metadata.</li>
+</ul>
+<h2 id="deploy-dev-and-prod-independently">Deploy dev and prod independently</h2>
+<p>Each environment has a separate remote state key and a distinct set of AWS
+resource names. The wrapper refuses unknown environment names so an accidental
+typo cannot silently create another stack:</p>
+<pre><code class="language-bash">cd zccusan/community-survey/terraform
+AWS_PROFILE=tf ./deploy-environment.sh dev plan
+AWS_PROFILE=tf ./deploy-environment.sh dev apply
+AWS_PROFILE=tf ./deploy-environment.sh prod plan
+</code></pre>
+<p>The state keys are:</p>
+<ul>
+<li><code>zcutils/community-survey/dev/terraform.tfstate</code></li>
+<li><code>zcutils/community-survey/prod/terraform.tfstate</code></li>
+</ul>
+<p>The equivalent explicit production commands are:</p>
+<pre><code class="language-bash">cd zccusan/community-survey/terraform
+AWS_PROFILE=tf terraform init \
+  -backend-config='bucket=caskey-terraform-state-storage' \
+  -backend-config='key=zcutils/community-survey/prod/terraform.tfstate' \
+  -backend-config='region=us-east-1' \
+  -backend-config='profile=tf' \
+  -backend-config='encrypt=true' \
+  -backend-config='use_lockfile=true'
+AWS_PROFILE=tf terraform plan -var-file=production.tfvars
+AWS_PROFILE=tf terraform apply -var-file=production.tfvars
+</code></pre>
+<p>Production uses remote, encrypted, versioned S3 state, DSQL deletion protection,
+30-day Lambda/API log retention, and API Gateway throttling. Development uses
+seven-day log retention, lower public API throttles, and no deletion protection.
+Both use single-Region Aurora DSQL: there are no provisioned database instances,
+no ACU floor, and no hourly database charge while idle. Database activity is
+metered in DPUs and retained data in GiB-month; the AWS monthly free tier
+currently includes 100,000 DPUs and 1 GiB of storage per management account.
+The Lambda uses 1,769 MB only while invoked, which grants one full vCPU and
+reduces cold PostgreSQL-driver startup without creating any standing capacity.</p>
+<p>After apply, capture:</p>
+<ul>
+<li><code>survey_post_url</code> from output</li>
+<li><code>api_endpoint</code></li>
+<li><code>dashboard_url</code></li>
+</ul>
+<p>Set these in your community survey publisher:</p>
+<pre><code class="language-bash">export ZCCUSAN_COMMUNITY_SURVEY_ENABLED=true
+export ZCCUSAN_COMMUNITY_SURVEY_API_ENDPOINT="$survey_post_url"
+</code></pre>
+<p>If you need to disable reporting without changing app code:</p>
+<pre><code class="language-bash">export ZCCUSAN_COMMUNITY_SURVEY_ENABLED=false
+</code></pre>
+<p>Then post survey payloads:</p>
+<pre><code class="language-bash">curl -s -X POST "$survey_post_url" \
+  -H 'content-type: application/json' \
+  -d '{"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"aws","cloud_region":"us-east-1","anonymous_installation_id":"anon-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_volume_count":2,"total_iops":1200}'
+</code></pre>
+<p>Stream multiple events in a single POST using any of these formats:</p>
+<ol>
+<li>JSON array:</li>
+</ol>
+<pre><code class="language-bash">curl -s -X POST "$survey_post_url" \
+  -H 'content-type: application/json' \
+  -d '[
+    {"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"aws","cloud_region":"us-east-1","anonymous_installation_id":"anon-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_volume_count":2,"total_iops":1200},
+    {"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"azure","cloud_region":"eastus","anonymous_installation_id":"anon-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","active_volume_count":1,"total_iops":400}
+  ]'
+</code></pre>
+<ol start="2">
+<li>Wrapped with <code>events</code>:</li>
+</ol>
+<pre><code class="language-bash">curl -s -X POST "$survey_post_url" \
+  -H 'content-type: application/json' \
+  -d '{"events":[
+    {"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"aws","cloud_region":"us-east-1","anonymous_installation_id":"anon-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_volume_count":2,"total_iops":1200}
+  ]}'
+</code></pre>
+<ol start="3">
+<li>NDJSON stream in the request body (one JSON object per line).</li>
+</ol>
+<p>Success response:</p>
+<pre><code class="language-json">{
+  "ok": true,
+  "accepted": 2,
+  "event_ids": ["...","..."],
+  "legacy_event_id": null
+}
+</code></pre>
+<h2 id="notes">Notes</h2>
+<ul>
+<li>Lambda connects to DSQL's PostgreSQL-compatible endpoint over TLS and uses
+<code>dsql:DbConnectAdmin</code> solely to bootstrap and access the event, environment,
+and benchmark-rail application tables.</li>
+<li>Schema-v2 benchmark publishers associate every sender rail with an anonymous
+run ID and include the exact logical-operation count and measured duration.
+Pulse publishes a parent logical IOPS result only after every declared rail
+arrives, using <code>sum(logical operations) / max(rail duration)</code>, and exposes the
+contributing rail measurements next to the aggregate.</li>
+<li>Keep <code>terraform</code> and AWS credentials scoped to least privilege when running this in CI/CD.</li>
+<li><code>survey_post_url</code> is the endpoint for <code>ZCCUSAN_COMMUNITY_SURVEY_API_ENDPOINT</code>.</li>
+<li>Telemetry is transformed into <code>NonIdentifyingTelemetry</code> before it leaves an
+installation. The API strictly validates that schema, stores only accepted
+anonymous records as application-append-only JSONB, and never persists source
+IPs. No public route performs raw reads, updates, or deletes.</li>
+<li><code>/community/environments</code> reads only a sanitized projection containing a
+one-way environment alias and coarse operational aggregates. <code>/dashboard</code>
+visualizes active and historical environments from that projection.</li>
+</ul>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#files">Files</a><a href="#deploy-dev-and-prod-independently">Deploy dev and prod independently</a><a href="#notes">Notes</a></nav></div></body></html>

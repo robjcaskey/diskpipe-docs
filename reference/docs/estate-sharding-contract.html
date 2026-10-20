@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Estate sharding contract · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="estate-sharding-contract">Estate sharding contract</h1>
+<p>This contract makes the federal-repatriation 4x envelope a concrete scheduler
+model without putting the whole estate in one process. Its scope ends at
+managed volumes. An agency-run object service is an application with managed
+backing volumes; its individual buckets and objects are not scheduler records.</p>
+<h2 id="concrete-universe">Concrete universe</h2>
+<p>The version-1 scheduler target contains 128 business entities, 512
+administrative regions, 1,024 failure-domain sites, 3.5 million storage hosts,
+400,000 logical applications, 2.8 million deployed environments, 12 million
+managed volumes, 8 million logical databases, and 50 million authoritative
+relationship edges. The directory divides those edges as follows:</p>
+<div class="table-scroll"><table><thead><tr><th>Relationship</th><th style="text-align: right">Concrete count</th></tr></thead><tbody>
+<tr><td>Database backed by volume</td><td style="text-align: right">24,000,000</td></tr>
+<tr><td>Application environment uses database</td><td style="text-align: right">8,000,000</td></tr>
+<tr><td>Volume consistency relationship</td><td style="text-align: right">10,000,000</td></tr>
+<tr><td>Application dependency</td><td style="text-align: right">8,000,000</td></tr>
+<tr><td><strong>Total</strong></td><td style="text-align: right"><strong>50,000,000</strong></td></tr>
+</tbody></table>
+</div>
+<p>Database-to-volume memberships are included in the 50 million total. They are
+not another 24 million edges added on top.</p>
+<h2 id="ownership-hierarchy">Ownership hierarchy</h2>
+<pre><code class="language-text">federation boundary state
+├── 512 regional export summaries
+├── relationship-directory checkpoint vector
+└── explicit cross-region operation manifests
+
+one logical relationship directory
+└── 4,096 authoritative partitions
+    └── exactly one authoritative copy of every relationship edge
+
+each region
+├── cached adjacency projection at a directory checkpoint epoch
+└── 16 regional state/scheduling shards
+    ├── applications, databases, and volumes homed in the region
+    ├── host, worker, lane, leaf, and local capacity assignments
+    └── lane-local HTB targets and private scheduling revisions
+</code></pre>
+<p>“One relationship directory” means one schema, namespace, consistency
+contract, and query surface. It does not mean one lock, one process, one Raft
+group, or one machine. An authoritative edge hashes to exactly one of 4,096
+partitions. Endpoint regions receive derived adjacency projections at a named
+directory high-water mark; those projections cannot author or commit an edge.</p>
+<p>Regional state shards own placement. The client block edge never chooses a
+mirror, stripe, tier, spill target, locality, or lane. Those remain userspace
+placement decisions and terminal block devices remain leaf media.</p>
+<h2 id="what-stays-inside-a-region">What stays inside a region</h2>
+<p>A normal lane/flow scheduling change updates only its regional state shard:</p>
+<ul>
+<li>volume-to-host and volume-to-lane assignments;</li>
+<li>worker and CPU affinity;</li>
+<li>mux, demux, terminal-leaf, and local recovery queue choices;</li>
+<li>lane-local HTB targets and borrowing;</li>
+<li>local capacity consumption that remains inside the current exported bucket;</li>
+<li>private scheduling generation and placement digest.</li>
+</ul>
+<p>No other region observes or acknowledges those changes. They do not update a
+federation log and cannot contend on a federation lock or atomic.</p>
+<p>A region publishes upstream only when a boundary value changes:</p>
+<ul>
+<li>online, fenced, or lease state;</li>
+<li>topology generation visible to placement outside the region;</li>
+<li>exported free-capacity or protected-IOPS bucket;</li>
+<li>failover-reserved bytes or IOPS;</li>
+<li>relationship-directory checkpoint epoch the region has consumed;</li>
+<li>a cross-region durability, recovery, or consistency commitment.</li>
+</ul>
+<p>Publishing an identical summary is a no-op. Consumers compare monotonically
+increasing export generations, not region-private schedule revisions.</p>
+<h2 id="cross-shard-atomic-work">Cross-shard atomic work</h2>
+<p>A snapshot, failover, or migration that genuinely spans shards first chooses
+one immutable relationship-directory checkpoint. Its compact epoch and root
+digest name an exact vector of the 4,096 partition HWMs. The directory resolves
+the relationship closure into participant shards. The coordinator persists a
+<code>CrossShardCutManifest</code> containing one bounded record per participant shard:
+member count and selector digest, not millions of volume IDs.</p>
+<p>Each participant resolves its selector locally at the declared checkpoint,
+prepares its immutable cut, and returns a token tied to its local revision. The
+coordinator commits only after all declared participants prepare. A region or
+shard absent from the manifest has no work and need not hear about the
+operation. A directory partition outage permits unaffected local scheduling to
+continue from cached state, but new relationship mutations and new cross-shard
+cuts requiring an unavailable checkpoint fail closed.</p>
+<p>Large operations therefore have hierarchical atomicity: one global manifest,
+one prepare record per participant shard, and shard-local bounded member sets.
+They never become one 12-million-entry Raft command.</p>
+<h2 id="deterministic-smaller-scale-model">Deterministic smaller-scale model</h2>
+<p><code>FederalEstateProjection::build(1_000)</code> constructs a deterministic 1:1,000
+model:</p>
+<div class="table-scroll"><table><thead><tr><th>Population</th><th style="text-align: right">Representative records</th><th style="text-align: right">Exact concrete weight</th></tr></thead><tbody>
+<tr><td>Storage hosts</td><td style="text-align: right">3,500</td><td style="text-align: right">3,500,000</td></tr>
+<tr><td>Logical applications</td><td style="text-align: right">400</td><td style="text-align: right">400,000</td></tr>
+<tr><td>Deployed environments</td><td style="text-align: right">2,800</td><td style="text-align: right">2,800,000</td></tr>
+<tr><td>Managed volumes</td><td style="text-align: right">12,000</td><td style="text-align: right">12,000,000</td></tr>
+<tr><td>Logical databases</td><td style="text-align: right">8,000</td><td style="text-align: right">8,000,000</td></tr>
+<tr><td>Relationship edges</td><td style="text-align: right">50,000</td><td style="text-align: right">50,000,000</td></tr>
+</tbody></table>
+</div>
+<p>Every representative owns a contiguous concrete ordinal range. The ranges
+cover each population exactly, with no gaps, overlaps, rounding loss, or
+uncounted tail. All 128 entities, 512 regions, 1,024 failure-domain sites, and
+relationship categories remain explicit rather than being scaled away.</p>
+<p>The projection is exact for cardinalities, weights, ownership boundaries,
+relationship categories, local-versus-cross-region classification, and
+capacity accounting. It is not proof that one representative graph has every
+pathological topology possible in 50 million individually materialized edges.
+Tests must therefore add adversarial graph profiles: giant components, hot
+endpoints, hub-and-spoke legacy clusters, dense consistency groups, acquisition
+overlays, and multi-region failure chains. Full materialization can be run as a
+separate distributed soak without changing the contract.</p>
+<h2 id="current-executable-checks">Current executable checks</h2>
+<p>The module tests establish that:</p>
+<ul>
+<li>50,000 authoritative representative records cover exactly 50 million edges;</li>
+<li>every relationship has exactly one authoritative partition;</li>
+<li>regional adjacency is a read-only projection at one directory checkpoint;</li>
+<li>10,000 downstream schedule changes produce no federation-state change;</li>
+<li>one changed regional capacity boundary produces exactly one export update;</li>
+<li>cross-shard cuts reject duplicate participants and use one exact directory
+checkpoint reference.</li>
+</ul>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#concrete-universe">Concrete universe</a><a href="#ownership-hierarchy">Ownership hierarchy</a><a href="#what-stays-inside-a-region">What stays inside a region</a><a href="#cross-shard-atomic-work">Cross-shard atomic work</a><a href="#deterministic-smaller-scale-model">Deterministic smaller-scale model</a><a href="#current-executable-checks">Current executable checks</a></nav></div></body></html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Snapshot CRD Upgrade Contract · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="snapshot-crd-upgrade-contract">Snapshot CRD Upgrade Contract</h1>
+<p>The snapshot CRDs are shared cluster-scoped API objects. They must be installed
+once per cluster, even when multiple zcblock CSI driver instances are installed
+to simulate regions.</p>
+<p>Current contract:</p>
+<ul>
+<li>External snapshotter release: <code>v8.3.0</code></li>
+<li>Snapshot CRD API group: <code>snapshot.storage.k8s.io</code></li>
+<li>Current required storage version: <code>v1</code></li>
+<li>Current supported storage versions: <code>v1</code></li>
+<li>Stair-step upgrades are required before any future storage-version change.</li>
+</ul>
+<p>The installer annotates each snapshot CRD with:</p>
+<ul>
+<li><code>zcutils.io/snapshotter-version</code></li>
+<li><code>zcutils.io/snapshot-crd-storage-version</code></li>
+<li><code>zcutils.io/snapshot-crd-supported-versions</code></li>
+<li><code>zcutils.io/snapshot-crd-n-minus-1</code></li>
+<li><code>zcutils.io/snapshot-crd-stair-step-required=true</code></li>
+</ul>
+<p>When a future CRD storage version appears, zcblock releases must follow this
+path:</p>
+<ol>
+<li>Ship release <code>N</code> that supports both the currently installed CRD storage
+version and the next storage version.</li>
+<li>Roll release <code>N</code> everywhere while the CRD still stores objects at the old
+version.</li>
+<li>Apply the new CRDs and run any required Kubernetes storage-version migration.</li>
+<li>Confirm every cluster stores the new version.</li>
+<li>Only in release <code>N+1</code> may support for <code>N-1</code> be removed.</li>
+</ol>
+<p>The practical rule is: a release that changes the expected CRD storage version
+must also support the previous storage version. If the installer sees an
+installed snapshot CRD storage version outside its supported set, it stops
+instead of applying the CRD so operators can upgrade through an intermediate
+release.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p></nav></div></body></html>

@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Untrusted federation 1: offer bounded storage to a friend · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="untrusted-federation-1-offer-bounded-storage-to-a-friend">Untrusted federation 1: offer bounded storage to a friend</h1>
+<blockquote>
+<p><strong>Target-state design preview:</strong> the peer grant, relay route, and connection
+enforcement on this page define an implementation contract. They are not yet
+available in the current chart.</p>
+</blockquote>
+<p>You and a friend each operate a region and do not trust the other's
+administrators. You want to let your friend's authenticated region retain at
+most 100 GB of live logical data on one dedicated file-backed userspace
+terminal while enforcing:</p>
+<ul>
+<li>16 KiB/s of long-term framed inbound network traffic;</li>
+<li>100 accepted logical IOPS;</li>
+<li>ciphertext-only storage;</li>
+<li>no key escrow or key delivery in either direction; and</li>
+<li>no transitive authority to invite another federation or peer.</li>
+</ul>
+<p>This guide interprets “16k/sec” as 16 kibibytes of complete encrypted frames per
+second. Use an explicit bit-rate unit if you intend 16 kbit/s. At this limit,
+4 KiB inbound writes are bandwidth-limited to roughly four per second before
+framing overhead even though the independent IOPS ceiling is 100.</p>
+<p>Both regions are behind NAT. TCP hole punching is not reliable enough to be a
+storage prerequisite, so each region establishes an outbound connection to a
+publicly reachable relay. The relay is not a federation member, durability
+copy, key holder, or control voter.</p>
+<h2 id="1-start-from-two-independent-regional-installations">1. Start from two independent regional installations</h2>
+<p>Each person completes the <a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">regional Kubernetes getting-started
+guide</a> in their own cluster.
+This guide calls your region <code>my-region</code> and your friend's region
+<code>buddy-region</code>.</p>
+<p>Create a bounded invitation for exactly one federation. The invitation grants
+no storage, key, or onward-federation authority by itself:</p>
+<pre><code class="language-bash">zcctl federation create friends-storage --region my-region
+zcctl federation invite friends-storage \
+  --region buddy-region --expires 10m --output buddy.invitation
+</code></pre>
+<p>Transfer <code>buddy.invitation</code> over an already authenticated channel. Your friend
+uses it once and deletes it:</p>
+<pre><code class="language-bash">zcctl federation join --invitation buddy.invitation
+rm buddy.invitation
+</code></pre>
+<p>Membership is directional and non-transitive. Your friend may operate other
+federations, but cannot add another region to <code>friends-storage</code>, enroll your
+region or this link in another federation, delegate this grant, or create a
+storage placement in your region without a separate grant committed by you.</p>
+<h2 id="2-configure-an-outbound-only-relay-route">2. Configure an outbound-only relay route</h2>
+<p>Operate or select a public relay at <code>relay.example.com:443</code>. Do not use the
+community survey or telemetry endpoint as a data relay.</p>
+<p>Create <code>relay-route.yaml</code> in both regions, changing <code>localRegion</code> appropriately:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: FederationTransportRoute
+metadata:
+  name: friends-storage-relay
+  namespace: zccusan
+spec:
+  federationRef: friends-storage
+  localRegion: my-region
+  peerRegion: buddy-region
+  connection:
+    mode: OutboundTcpRelay
+    endpoint: relay.example.com:443
+  payloadProtection:
+    nativeAuthenticatedEncryption: Required
+    tls: Required
+  relayAuthority:
+    mayDecryptPayload: false
+    mayJoinFederation: false
+    mayAcknowledgeDurability: false
+</code></pre>
+<p>Both peers dial out. Native framing encryption remains end-to-end between the
+regions; relay TLS protects the outer connection and does not give the relay a
+volume key. The relay can still observe connection endpoints, timing, and
+traffic volume, which the trust report must disclose.</p>
+<h2 id="3-dedicate-an-elastically-allocated-file-backed-userspace-terminal">3. Dedicate an elastically allocated file-backed userspace terminal</h2>
+<p>Label only the node on which you intend to store your friend's ciphertext:</p>
+<pre><code class="language-bash">kubectl label node some-storage-node \
+  storage.zcutils.io/friends-file-terminal=true
+</code></pre>
+<p>Create <code>buddy-file-media.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: MediaGrant
+metadata:
+  name: buddy-file-terminal
+spec:
+  nodeSelector:
+    matchLabels:
+      storage.zcutils.io/friends-file-terminal: "true"
+  mediaSets:
+    - name: buddy-file
+      staticSources:
+        - kind: FileArena
+          path: /var/lib/zccusan/federated/buddy-100g.wal
+          maximumLogicalLiveBytes: 100G
+          allocation:
+            mode: ElasticExtents
+            preferredIncrement: 4G
+            capacityPlanRef: buddy-file-pool
+          preparation:
+            create: IfMissing
+            requireDedicatedEmptyPath: true
+      publishAs:
+        mediaClass: buddy-file-terminal
+        durability: FilesystemFsync
+        failureDomains:
+          - kubernetes.io/hostname
+    - name: buddy-overflow
+      staticSources:
+        - kind: ObjectWal
+          url: s3://replace-with-private-bucket/buddy-overflow
+          authentication:
+            kind: WorkloadIdentity
+      publishAs:
+        mediaClass: buddy-object-overflow
+        durability: RetainedObjectCommit
+</code></pre>
+<p><code>FileArena</code> is a regular file written by a userspace WAL terminal. It
+is not attached through loop, device mapper, software RAID, or a custom block
+mirror. This example provides one custody copy and makes no regional-HA claim.
+The operator must refuse <code>FilesystemFsync</code> durability if the mounted filesystem
+and underlying media cannot prove the requested sync semantics.</p>
+<p>The backing file is not eagerly allocated to a guessed worst-case size. It
+grows in filesystem extents, preferably 4 GB at a time. A sparse maximum length
+alone is not a reservation: <code>buddy-file-pool</code> must admit a pool-level elastic
+capacity obligation that other tenants cannot consume.</p>
+<p>Apply the grant and wait for its exact resolved path, filesystem, capacity, and
+durability evidence:</p>
+<pre><code class="language-bash">kubectl apply -f buddy-file-media.yaml
+kubectl get mediagrant buddy-file-terminal --watch
+</code></pre>
+<h2 id="4-grant-bounded-inbound-custody">4. Grant bounded inbound custody</h2>
+<p>Create <code>buddy-capacity-grant.yaml</code>:</p>
+<pre><code class="language-yaml">apiVersion: storage.zcutils.io/v1alpha1
+kind: FederatedCapacityGrant
+metadata:
+  name: buddy-inbound
+  namespace: zccusan
+spec:
+  federationRef: friends-storage
+  granteeRegion: buddy-region
+  direction: Inbound
+  placement:
+    mediaClass: buddy-file-terminal
+    maximumLogicalLiveBytes: 100G
+    maximumVolumes: 16
+    physicalCapacity:
+      assurance: ReservedElastic
+      providerRef: buddy-file-pool
+      preferredAllocationIncrement: 4G
+      forecastHorizon: 6h
+      include:
+        - LiveMaterializedBytes
+        - RetainedWal
+        - BoundedCompactionWorkspace
+        - GrantedIngressLiability
+      reservationShortfallAction: MarkBestEffortThenBackpressure
+    overflow:
+      mediaClass: buddy-object-overflow
+      capacity:
+        assurance: ReservedElastic
+        providerRef: buddy-overflow-pool
+        preferredAllocationIncrement: 16G
+      beginWhen:
+        uncompactedWalBytes: 10G
+        predictedPrimaryFillWithin: 6h
+      stopWhen:
+        uncompactedWalBytesBelow: 5G
+        primaryFreeBytesAbove: 25G
+      unavailableAction: Backpressure
+  traffic:
+    maximumFramedIngressBytesPerSecond: 16Ki
+    ingressBurstBytes: 64Ki
+    maximumAcceptedLogicalIops: 100
+    iopsBurst: 20
+  encryption:
+    acceptedPayload: CiphertextOnly
+    keyEscrow: Denied
+    rejectKeyMaterial: true
+    mayServeEncryptedRestore: true
+  delegation:
+    transitive: false
+    mayInviteRegions: false
+    mayDelegateGrant: false
+    mayEnrollInAnotherFederation: false
+  maintenance:
+    compaction:
+      scheduling: Opportunistic
+      localCpu:
+        runBelowUtilization: 30%
+        minimumQuietPeriod: 30s
+        maximumCpu: "1"
+        mayPreemptForeground: false
+      maximumRewriteChunkBytes: 1G
+      whenBehind: Overflow
+</code></pre>
+<pre><code class="language-bash">kubectl apply -f buddy-capacity-grant.yaml
+zcctl federation grant status buddy-inbound --show-effective-limits
+</code></pre>
+<p>The 100 GB value is a hard live-logical custody ceiling. Physical overhead is a
+changing planner obligation, not extra logical space available to your friend.
+Its provider policy independently bounds spend and total pool exposure.
+Admission rejects a placement when the required obligation cannot be reserved
+and never evicts retained WAL silently to make room.</p>
+<p>The key prohibition is structural. The data RPC accepts only encrypted replica
+envelopes, while key escrow is a separate typed operation denied by this grant.
+A frame declared as plaintext, a wrapped DEK, or a key envelope is rejected.
+Your region never imports remote material into its key store and therefore
+cannot mount or inspect the friend's files.</p>
+<p>No protocol can prove that a malicious peer did not hide a key inside arbitrary
+opaque ciphertext. The meaningful guarantee is that your system cannot
+recognize, activate, release, or treat those opaque bytes as escrowed key
+material.</p>
+<h2 id="5-defer-compaction-without-risking-the-retained-wal">5. Defer compaction without risking the retained WAL</h2>
+<p>Foreground ingest only appends sealed immutable segments and updates bounded
+lane-local indexes. It never performs compaction inline. When local CPU remains
+below 30% for the quiet window, a low-priority worker compacts at most a 1 GB
+chunk into a new immutable checkpoint and yields immediately if foreground CPU
+or I/O demand returns.</p>
+<p>The planner continuously recalculates required physical capacity from current
+live bytes, WAL creation and reclamation rates, retained checkpoint policy, one
+bounded compaction chunk, provisioning lead time, and granted ingress
+liability. That last value is exact: outstanding byte credits plus the open
+segment tail and bounded manifest overhead. Capacity is reserved before those
+credits are issued and becomes ordinary WAL consumption as frames land. The
+planner requests additional extents before the forecast crosses the provider's
+lead time; it does not reserve a fixed percentage that is permanently wrong
+for both quiet and high-churn file sets.</p>
+<p>Compaction is allowed to remain deferred indefinitely while overflow is
+healthy. When uncompacted WAL or predicted time-to-full crosses the configured
+threshold, whole sealed segments spill through the userspace placement stage
+to the object-WAL media class. A manifest records whether each segment resides
+in the file arena, object overflow, or both. The low-rate manifest commit—not a
+block-layer remap—changes custody.</p>
+<p>An ephemeral recovery worker may later read segments from object storage,
+create a replacement checkpoint, commit its content manifest, and reclaim old
+segments only after retention and descendant receipts allow it. If local
+headroom and overflow are both exhausted, the receiver stops granting credits
+before overwriting or acknowledging unretained data.</p>
+<p>The pressure controller uses hysteresis so segments do not bounce between the
+file and bucket at one threshold. Status reports live logical bytes,
+uncompacted WAL, compaction workspace, granted-but-not-landed ingress,
+overflow bytes, predicted time-to-full, and the exact HWM retained by each
+tier.</p>
+<h2 id="6-enforce-cooperative-shaping-without-trusting-the-sender">6. Enforce cooperative shaping without trusting the sender</h2>
+<p>The receiver publishes a generation-bound traffic contract and grants bounded
+byte and operation credits. A cooperative sender shapes before transmission.
+The receiving lane remains authoritative and uses exact byte and IOPS token
+buckets at these low rates.</p>
+<p>Normal jitter exhausts credit and applies backpressure; it does not immediately
+punish the peer. The server terminates a connection when a sender transmits
+beyond issued application credits, violates framing, attempts a forbidden key
+operation, or reconnects to bypass an active delay.</p>
+<p>Each <code>RateContractViolation</code> response includes a signed <code>resumeAfter</code> bound to:</p>
+<pre><code class="language-text">(federation ID, authenticated peer ID, grant ID, grant generation)
+</code></pre>
+<p>Reconnect delay escalates with bounded exponential backoff and jitter:</p>
+<pre><code class="language-text">1s, 2s, 4s, 8s, ... up to 5m
+</code></pre>
+<p>The regional receiver persists the violation level outside the connection, so
+new TCP sessions, relay circuits, source ports, or NAT mappings cannot reset
+it. Ten minutes of compliance reduces the level one step rather than clearing
+it instantly. An administrator can reset it through an audited policy
+operation.</p>
+<p>During the delay, admission rejects the authenticated peer before allocating a
+data arena or opening the file terminal. Stateless edge cookies and coarse
+pre-authentication source limits protect the handshake itself. Per-frame
+violations are summarized regionally; they do not flood global Raft.</p>
+<p>Inspect both accepted work and rejected attempts:</p>
+<pre><code class="language-bash">zcctl federation grant watch buddy-inbound \
+  --show-rate --show-backoff --show-custody
+</code></pre>
+<p>The report distinguishes accepted logical IOPS from rejected frames and counts
+the entire authenticated wire frame against the byte ceiling.</p>
+<h2 id="7-revoke-and-clean-up">7. Revoke and clean up</h2>
+<p>Revocation blocks new writes immediately but retains existing ciphertext until
+the agreed retention or explicit return/delete protocol completes:</p>
+<pre><code class="language-bash">zcctl federation grant revoke buddy-inbound --retain-existing
+zcctl federation grant status buddy-inbound --watch
+kubectl delete -f buddy-capacity-grant.yaml
+kubectl delete -f buddy-file-media.yaml
+kubectl label node some-storage-node \
+  storage.zcutils.io/friends-file-terminal-
+</code></pre>
+<p>Continue with <a href="../docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_STORAGE_ON_KUBERNETES.html">placing 100 MB of your own encrypted files in an untrusted
+region</a>.
+If your friend refuses to run Kubernetes, use the sibling guide for <a href="../docs/GETTING_STARTED_WITH_A_MACOS_FEDERATED_REGION.html">running a
+federated region directly on a Mac</a>.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#1-start-from-two-independent-regional-installations">1. Start from two independent regional installations</a><a href="#2-configure-an-outbound-only-relay-route">2. Configure an outbound-only relay route</a><a href="#3-dedicate-an-elastically-allocated-file-backed-userspace-terminal">3. Dedicate an elastically allocated file-backed userspace terminal</a><a href="#4-grant-bounded-inbound-custody">4. Grant bounded inbound custody</a><a href="#5-defer-compaction-without-risking-the-retained-wal">5. Defer compaction without risking the retained WAL</a><a href="#6-enforce-cooperative-shaping-without-trusting-the-sender">6. Enforce cooperative shaping without trusting the sender</a><a href="#7-revoke-and-clean-up">7. Revoke and clean up</a></nav></div></body></html>

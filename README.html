@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Diskpipe · Diskpipe</title><link rel="stylesheet" href="site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="index.html">Diskpipe</a><a href="kubernetes.html">With Kubernetes</a><a href="standalone.html">Without Kubernetes</a><a href="day-2.html">Day-two operations</a><a href="universe.html">Zero Copy Cinematic Universe</a><a href="index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="diskpipe">Diskpipe</h1>
+<p>Diskpipe is the storage project formerly presented as zccusan. Source paths,
+binary names and deployment commands retain their current names during the transition.</p>
+<p>Canonical chain:</p>
+<pre><code class="language-text">descriptor zero-copy primitives
+-&gt; zero-copy streams
+-&gt; zero-copy WALs, including WALs of WALs
+-&gt; zcvolume
+-&gt; zcsan
+-&gt; convenience zccsi
+</code></pre>
+<p>This directory contains the Kubernetes/SAN-facing material without changing the
+Rust binary names, Cargo targets, container entrypoints, or in-cluster paths.</p>
+<h2 id="documentation">Documentation</h2>
+<p>zccusan has its own <a href="index.html">documentation home</a>.
+Choose <a href="kubernetes.html">with Kubernetes</a> or
+<a href="standalone.html">without Kubernetes</a>. Either can run on physical
+servers, virtual machines or cloud instances.</p>
+<p>The <a href="universe.html">Zero Copy Cinematic Universe</a> connects this
+project with the underlying zcutils tools.</p>
+<h2 id="reference-library">Reference library</h2>
+<ul>
+<li><code>docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.md</code>: narrated,
+volatile-RAM Kubernetes happy path.</li>
+<li><code>docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES_DETAILED.md</code>: the complete
+second-step install, configuration, validation, and troubleshooting guide.</li>
+<li><code>docs/VALIDATING_SINGLE_REGION_HA_ON_KUBERNETES.md</code>: approachable, graded
+single-region fault check using the separately installed chaos toolbox.</li>
+<li><code>docs/zccusan.md</code>: canonical zccusan layering and the rule that <code>zccsi</code> is a
+convenience adapter above <code>zcsan</code>, not the storage authority.</li>
+<li><code>docs/streaming-replication-shaping.md</code>: replication stream control,
+token-bucket shaping, snapshot transfer, WAL catch-up, and gateway direction.</li>
+<li><code>deploy/zcblock-csi/README.md</code>: raw Kubernetes manifests, local multi-region
+test installs, snapshot API requirements, and operational examples.</li>
+<li><code>charts/zcblock-csi/README.md</code>: no-hooks Helm chart, including the
+<code>helm template ... | kubectl apply -f -</code> stair-step upgrade idiom.</li>
+<li><code>deploy/zcblock-csi/CRD-UPGRADES.md</code>: snapshot CRD and snapshot-controller
+versioning rules.</li>
+</ul>
+<h2 id="layout">Layout</h2>
+<ul>
+<li><code>deploy/zcblock-csi/</code> contains raw Kubernetes manifests and install/test
+scripts.</li>
+<li><code>charts/zcblock-csi/</code> contains the no-hooks Helm chart.</li>
+<li><code>charts/zccusan-chaos-toolbox/</code> contains the separate, opt-in fault toolbox.</li>
+<li><code>docs/</code> contains zccusan architecture and replication/shaping docs.</li>
+</ul>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#documentation">Documentation</a><a href="#reference-library">Reference library</a><a href="#layout">Layout</a></nav></div></body></html>

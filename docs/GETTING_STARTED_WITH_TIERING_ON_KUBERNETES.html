@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Getting started with tiering on Kubernetes · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="getting-started-with-tiering-on-kubernetes">Getting started with tiering on Kubernetes</h1>
+<p>This continues the two-copy mirror walkthrough. The operator now accepts a
+<code>TieringPolicy</code> referenced by a mirrored <code>StorageProfile</code> and installs a
+separate userspace tier at each selected leaf. It does not put placement,
+mirroring, or spill decisions in <code>/dev/zcnblk0</code>.</p>
+<p>The reconciled path is:</p>
+<pre><code class="language-text">/dev/zcnblk0 client edge
+  -&gt; userspace onramp
+  -&gt; userspace mirror
+  -&gt; one userspace zctier stage per mirror leg
+  -&gt; tmpfs hot file + bounded asynchronous host-file spill
+</code></pre>
+<p>The first policy shape supports <code>MemoryEmptyDir</code> hot storage and a retained
+<code>HostPathFile</code> spill. Reads after a leaf restart rehydrate from the spill file.
+The hot write is the leaf completion authority; asynchronous spill is never
+reported as a durable HWM.</p>
+<h2 id="apply-the-tiered-profile">Apply the tiered profile</h2>
+<p>Choose three or more schedulable nodes: one client and two distinct leaves.
+Then apply the example:</p>
+<pre><code class="language-bash">kubectl apply -f zccusan/deploy/zcblock-csi/getting-started/tiered-mirror-ram.yaml
+
+kubectl get tieringpolicy ram-hot-host-spill -o yaml
+kubectl get storageprofile tiered-two-copy -o yaml
+</code></pre>
+<p>Both status objects must reach <code>phase: Ready</code>. Create a PVC using the generated
+<code>zc-tiered-two-copy</code> StorageClass and run the fio Pod from the mirror guide,
+changing its claim name if necessary. <code>excludeClientNode: true</code> and the
+hostname topology key keep the two terminal leaf Pods off the client and on
+different nodes.</p>
+<p>Inspect the realized tier contract:</p>
+<pre><code class="language-bash">kubectl get zcvolume -A -o yaml
+kubectl get pods -A -l storage.zcutils.io/stage=terminal-leaf -o wide
+</code></pre>
+<p>Each leaf status includes its policy, hot/spill kinds, spill path,
+backpressure budget, and the explicit <code>hot-only</code> acknowledgement statement.
+Deleting and recreating a leaf Pod removes its tmpfs hot file; its retained
+spill file becomes the read fallback and is rehydrated on demand.</p>
+<p>Current boundaries are fail-closed: block-backed <code>MediaGrant</code> leaves cannot be
+wrapped by this first tier policy, <code>rehydrateOnColdStart</code> must be true, and
+<code>reclaimPolicy</code> must be <code>Retain</code>. A block device may still be terminal media
+behind a later userspace tier implementation; it will never become the tier or
+mirror primitive.</p>
+<p>Continue with the three-part <a href="../docs/GETTING_STARTED_WITH_CROSS_REGION_REPLICATION_ON_KUBERNETES.html">cross-region replication and recovery
+series</a> after
+the regional volume is healthy.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#apply-the-tiered-profile">Apply the tiered profile</a></nav></div></body></html>

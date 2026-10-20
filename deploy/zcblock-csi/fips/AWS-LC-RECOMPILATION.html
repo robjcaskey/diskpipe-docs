@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>AWS-LC certificate 5314 recompilation guide · Diskpipe</title><link rel="stylesheet" href="../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../index.html">Diskpipe</a><a href="../../../kubernetes.html">With Kubernetes</a><a href="../../../standalone.html">Without Kubernetes</a><a href="../../../day-2.html">Day-two operations</a><a href="../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="aws-lc-certificate-5314-recompilation-guide">AWS-LC certificate 5314 recompilation guide</h1>
+<p>This guide separates reproduction of the validated module build from compiling
+the zcutils Rust application. It applies to the <strong>static AWS-LC FIPS 3.1.0
+module on CMVP certificate 5314</strong>. It does not extend the certificate to another
+module version or operational environment.</p>
+<p>The controlling document is the certificate's
+<a href="https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp5314.pdf">Security Policy</a>,
+especially sections 2.2, 2.4, 6, 10, and 11.1. Check the live
+<a href="https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5314">certificate record</a>
+for status and policy revisions before every release.</p>
+<h2 id="what-section-111-requires">What section 11.1 requires</h2>
+<ol>
+<li>
+<p>Build the complete, unchanged <code>AWS-LC-FIPS-3.1.0.zip</code> source archive. Its
+SHA-256 must be
+<code>fe408fa438850786396faf79eba9ea4116c3802e60f3a95865f0dd2adb64c9f1</code>.</p>
+</li>
+<li>
+<p>On Amazon Linux 2023, install the <code>Development Tools</code> group, <code>cmake3</code>, and
+<code>golang</code> as directed by the policy.</p>
+</li>
+<li>
+<p>From a newly extracted source tree, run these commands without adding
+options:</p>
+<pre><code class="language-sh">mkdir build
+cd build
+cmake3 -DFIPS=1 ..
+make
+</code></pre>
+</li>
+<li>
+<p>Require <code>./tool/bssl isfips</code> to print <code>1</code>.</p>
+</li>
+<li>
+<p>Require <code>awslc_version_string()</code> to return <code>AWS-LC FIPS 3.1.0</code> and confirm
+that a statically linked application defines one <code>T awslc_version_string</code>
+symbol.</p>
+</li>
+<li>
+<p>Run on one of the tested environment pairs when claiming the certificate's
+tested profile:</p>
+<div class="table-scroll"><table><thead><tr><th>OS</th><th>Architecture</th><th>Hardware</th></tr></thead><tbody>
+<tr><td>Amazon Linux 2023</td><td>x86_64</td><td><code>c6i.metal</code>, Intel Xeon Platinum 8375C</td></tr>
+<tr><td>Amazon Linux 2023</td><td>aarch64</td><td><code>r8g.metal-24xl</code>, Graviton4</td></tr>
+</tbody></table>
+</div></li>
+</ol>
+<p>The policy lists both PAA/PAI states for each platform. It lists no
+vendor-affirmed operational environments. Building elsewhere can be useful as
+a rehearsal, but it is not the tested certificate profile.</p>
+<p>After installing the prerequisites exactly as the policy directs, the checked
+runner performs steps 1 and 3 through 5 and writes hashes and environment
+evidence:</p>
+<pre><code class="language-sh">python3 scripts/fips-recompile-aws-lc.py \
+  --archive /path/to/AWS-LC-FIPS-3.1.0.zip \
+  --work-dir /var/tmp/aws-lc-5314-build-001 \
+  --provider-dir "$PWD/zccusan/deploy/zcblock-csi/fips/provider" \
+  --report /var/tmp/aws-lc-5314-build-001.json
+</code></pre>
+<p>Both the work and provider directories must be new. The provider directory is
+a package of the already-built headers, <code>libcrypto.a</code>, <code>bcm.o</code>, and a receipt;
+creating it does not rebuild or change the native module. Packaging zeros member timestamps and owner/group IDs and fixes object modes
+to 0644 in <code>libcrypto.a</code>, preserving all remaining bytes, including
+objects, names, order, duplicates, and the symbol index. The original archive is
+retained as <code>share/zcutils/fips/libcrypto.original.a</code>; the full build record binds
+its original hash. Acceptance recomputes this exact archive-metadata transformation
+and rejects any other change. The stable provider receipt identifies the
+normalized linker input. This packaging step is documented for boundary review,
+not asserted to extend certificate coverage. Keep the package inside the
+container build context but out of source control. The script refuses an
+unlisted environment by default. <code>--allow-untested-environment</code> permits a local
+rehearsal and records <code>certificate_profile_environment: false</code>; the Rust adapter
+and acceptance collector reject that package for a tested-profile build.</p>
+<h2 id="why-the-ordinary-cargo-build-is-not-used">Why the ordinary Cargo build is not used</h2>
+<p>The pinned <code>aws-lc-rs 1.15.3</code> resolves <code>aws-lc-fips-sys 0.13.11</code>, which contains
+AWS-LC FIPS 3.1.0. Its ordinary Cargo build does not execute the section 11.1
+procedure literally. It enters through the sys crate's wrapper CMake project
+and changes the native configuration:</p>
+<div class="table-scroll"><table><thead><tr><th>Section 11.1 build</th><th>Current <code>aws-lc-fips-sys</code> build</th></tr></thead><tbody>
+<tr><td>CMake source directory is the unchanged AWS-LC root</td><td>CMake source directory is the Rust sys-crate wrapper</td></tr>
+<tr><td>No symbol prefix option</td><td>Adds <code>BORINGSSL_PREFIX=aws_lc_fips_0_13_11_</code></td></tr>
+<tr><td>No build type option</td><td>Adds <code>CMAKE_BUILD_TYPE=release</code> for a release Cargo build</td></tr>
+<tr><td>AWS-LC defaults build the tool, libssl, and tests</td><td>Sets <code>BUILD_TOOL=OFF</code>, <code>BUILD_LIBSSL=OFF</code>, and <code>BUILD_TESTING=OFF</code></td></tr>
+<tr><td>Compiler flags come from the policy command and platform defaults</td><td>Cargo/cmake-rs adds section, PIC, architecture, and source-path flags</td></tr>
+</tbody></table>
+</div>
+<p>Restoring the complete archive inside the crate proves source equivalence. It
+does not make these command and configuration differences disappear. A working
+<code>FIPS_mode()</code>, integrity self-test, version string, or service indicator also
+does not prove that the section 11.1 installation procedure was followed.</p>
+<p>The acceptance collector records that bundled Cargo path as
+<code>not-section-11.1</code> and treats it as a module-gate failure. A reviewer cannot
+waive that known procedural difference merely by signing the review JSON.</p>
+<h2 id="path-to-a-rust-application-using-the-exact-module-build">Path to a Rust application using the exact module build</h2>
+<p>The repository now supplies <code>vendor/aws-lc-fips-sys-provider</code>, a small FFI
+adapter outside the module boundary. Cargo patches <code>aws-lc-fips-sys 0.13.11</code> to
+this adapter so <code>aws-lc-rs 1.15.3</code> keeps its matching FIPS 3.1 API while the
+native implementation comes only from the provider package. The adapter:</p>
+<ol>
+<li>has no AWS-LC C source and no bundled-build fallback;</li>
+<li>requires an absolute <code>AWS_LC_FIPS_SYS_SYSTEM_DIR</code> and a valid provider
+receipt for certificate 5314, FIPS 3.1.0, the exact archive, exact two policy
+commands, and a certificate-profile environment;</li>
+<li>verifies the packaged <code>libcrypto.a</code> and <code>bcm.o</code> hashes before linking;</li>
+<li>derives unprefixed declarations from the exact upstream 0.13.11 generated
+bindings without renaming the native module;</li>
+<li>links the recorded <code>libcrypto.a</code> statically and forces a pre-<code>main</code> integrity
+and FIPS-mode check into each executable; and</li>
+<li>exposes the provider receipt, library, and <code>bcm.o</code> hashes in runtime evidence.</li>
+</ol>
+<p>The image build refuses to run without this package. It copies the package into
+the isolated builder, sets <code>AWS_LC_FIPS_SYS_SYSTEM_DIR</code>, and never invokes the
+old source-restoration/CMake route. Build it with:</p>
+<pre><code class="language-sh">FIPS_DISTRO=amzn2023 \
+FIPS_PROVIDER_ROOT=zccusan/deploy/zcblock-csi/fips/provider \
+  zccusan/deploy/zcblock-csi/build-fips-image.sh
+</code></pre>
+<p>The build receipt binds the provider receipt, adapter and application sources,
+tool versions, final executable hashes, and runtime provider hashes. Acceptance
+requires every executable to define the unprefixed <code>awslc_version_string</code>, to
+contain no 0.13.11-prefixed AWS-LC identity, and to have no dynamic OpenSSL or
+libcrypto dependency. It then repeats module identity, integrity, self-test,
+approved-service, and application call-path checks against every executable.</p>
+<p>Upstream <code>aws-lc-fips-sys 0.13.11</code> has no supported external-library mode. The
+newer upstream system-library interface targets the FIPS 4 module generation,
+so it is not substituted for certificate 5314. This local adapter is custom
+integration code outside the module boundary. A qualified reviewer or CMVP lab
+must confirm the boundary and linking rationale; the automated checks establish
+artifact identity and fail-closed behavior, not that legal conclusion. The
+frozen 3.1.0 source also has published security advisories that require a
+release disposition.</p>
+<p>Until that review exists and all service/operation gates pass on the deployed
+node, the image remains a FIPS evaluation candidate and must not be labeled a
+certificate-covered build.</p>
+<h2 id="ephemeral-certificate-profile-build">Ephemeral certificate-profile build</h2>
+<p><code>.github/workflows/fips-aws-lc-5314.yml</code> launches one <code>c6i.metal</code> worker from a
+pinned AWS-owned Amazon Linux 2023 AMI. The launch job verifies the live AMI
+owner, name, architecture and state. The worker then verifies its IMDS AMI and
+instance IDs, DMI product/vendor, processor, and OS release before doing any
+build work. It downloads the policy URL, verifies the policy hash, runs the
+checked native reproduction, builds <code>zc-fips-check</code> against the resulting
+provider, and uploads the provider, linked binary and receipts.</p>
+<p>Terraform only limits which capacity the GitHub role may launch. It is not part
+of the FIPS evidence. The deployed role requires the shared ad hoc cleanup tags
+on the instance, volume and network interface at creation, including
+<code>adhocKeepaliveModeAction=terminate</code> and <code>adhocKeepalive=ExpiresAt</code>. The launcher
+also verifies a per-run termination schedule before the self-hosted job starts,
+and the guest has an independent shutdown timer.</p>
+<p>From an administrative GitHub CLI session, mint the one-job JIT registration,
+dispatch the workflow, download its artifacts and verify their hashes with:</p>
+<pre><code class="language-sh">python3 scripts/test-github-ec2-runner.py --fips-build
+</code></pre>
+<p>This incurs charges only while the worker, EBS volume and automatic public IPv4
+address exist. It does not perform the qualified boundary/service review or the
+deployment-node acceptance gate.</p>
+<p>Retain the source archive, report, complete build logs, module and final-binary
+hashes, package inventory, image digest, and deployment-environment evidence
+for each release. Re-run the procedure separately for each processor/OS
+combination; an artifact from one combination is not evidence for another.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#what-section-111-requires">What section 11.1 requires</a><a href="#why-the-ordinary-cargo-build-is-not-used">Why the ordinary Cargo build is not used</a><a href="#path-to-a-rust-application-using-the-exact-module-build">Path to a Rust application using the exact module build</a><a href="#ephemeral-certificate-profile-build">Ephemeral certificate-profile build</a></nav></div></body></html>

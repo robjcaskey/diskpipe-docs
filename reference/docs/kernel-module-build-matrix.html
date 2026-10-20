@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Kernel-module build matrix · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="kernel-module-build-matrix">Kernel-module build matrix</h1>
+<p><code>zcnblk_client_mod.ko</code> is a kernel-ABI artifact, not an instance-type artifact.
+The build matrix therefore keeps two independent locks:</p>
+<ul>
+<li><a href="../../assets/repository/kmods/matrix/targets.json"><code>kmods/matrix/targets.json</code></a> pins exact kernel
+releases, container image digests, header packages, upstream tool revisions,
+and the authoritative pages used to select them.</li>
+<li><a href="../../assets/repository/kmods/matrix/machine-profiles.json"><code>kmods/matrix/machine-profiles.json</code></a>
+maps representative ordinary, Arm, multi-NIC, and RDMA machine profiles to
+candidate ABI artifacts. The loader must still require exact architecture and
+<code>uname -r</code>; a machine profile is never sufficient evidence by itself.</li>
+</ul>
+<p>The current lock was researched on 2026-08-27 UTC. It covers:</p>
+<div class="table-scroll"><table><thead><tr><th>Platform</th><th>Current pin</th><th>Architectures</th></tr></thead><tbody>
+<tr><td>EKS AL2023, newest minor</td><td>EKS <code>1.36.2-20260818</code>, release <code>v20260818</code>, Linux <code>6.18.41-94.142.amzn2023</code></td><td>amd64, arm64</td></tr>
+<tr><td>EKS AL2023, maintained minor</td><td>EKS <code>1.35.6-20260818</code>, release <code>v20260818</code>, Linux <code>6.12.100-125.179.amzn2023</code></td><td>amd64, arm64</td></tr>
+<tr><td>GKE Regular COS</td><td>GKE <code>1.35.6-gke.1641000</code>, COS <code>cos-125-19216-395-138</code>, Linux <code>6.12.85+</code></td><td>amd64, arm64</td></tr>
+<tr><td>AKS default Ubuntu</td><td>node image <code>202607.29.0</code>, Ubuntu 24.04 Azure kernel <code>6.8.0-1063-azure</code></td><td>amd64</td></tr>
+<tr><td>Debian stable</td><td>Debian <code>13.6</code>, Linux <code>6.12.105+deb13</code> generic and cloud-image kernels</td><td>amd64, arm64</td></tr>
+<tr><td>UBI 10.2 / EL10</td><td>UBI 10.2 toolchain, CentOS Stream 10 Linux <code>6.12.0-264.el10</code></td><td>amd64, arm64</td></tr>
+<tr><td>NixOS stable</td><td>NixOS <code>26.05.8477.062346a6d85b</code>, Linux <code>6.18.46</code></td><td>amd64</td></tr>
+</tbody></table>
+</div>
+<p>The source URLs in the lock are part of the review record. Do not update a pin
+from memory: consult the current provider release table, select the desired new
+cluster default or stable channel, record the exact digest/package NVR, and run
+the complete build before merging the lock change.</p>
+<p>Debian header builds use the dated <code>aptSnapshot</code> and <code>aptSuite</code> in each target
+to keep exact ABI packages available after they leave the live mirrors. The
+build container uses Debian snapshot repositories with signature and package
+hash verification enabled; only historical Release expiry checks are disabled.
+The artifact includes <code>build-apt-sources.list</code> alongside its package versions.
+This does not change the runtime image package repositories.</p>
+<h2 id="local-builds-without-cloud-resources">Local builds without cloud resources</h2>
+<p>List or build exact targets with Docker or Podman:</p>
+<pre><code class="language-console">scripts/zccusan-build-kmod-matrix.sh --list
+
+scripts/zccusan-build-kmod-matrix.sh \
+  --target eks-al2023-1.36-amd64 \
+  --engine podman \
+  --cache /mnt/bulk_data/zc-kmod-matrix/cache \
+  --output /mnt/bulk_data/zc-kmod-matrix/dist
+</code></pre>
+<p><code>--all</code> builds the full lock. Arm Debian, EKS, and UBI images require native
+Arm or local binfmt/QEMU support. GKE Arm uses the exact cross-toolchain and
+headers published with the Arm COS release, so its development container runs
+on amd64. No command in the builder creates a VM, Kubernetes cluster, or other
+cloud resource.</p>
+<p>Each successful directory contains the module, its SHA-256, vermagic, exact
+target fragment, source hashes, toolchain/package evidence, and a small
+<code>metadata.env</code>. The build fails if the module name or vermagic does not match
+the lock.</p>
+<p><code>scripts/zccusan-package-daemonset-kmods.sh</code> re-audits those artifacts and
+creates one architecture-local image root. CI copies that root into the normal
+<code>zcblock-csi</code> image at <code>/opt/zcutils/kmods</code>; it does not publish or require a
+second kernel-module image.</p>
+<p>The source bundle carries both a convenience <code>Makefile</code> and a declarative
+<code>Kbuild</code>. Linux 6.18 and later can generate an output <code>Makefile</code> while setting
+up an external-module build; keeping <code>obj-m</code> in <code>Kbuild</code> prevents that generated
+file from erasing the module declarations.</p>
+<h2 id="platform-details">Platform details</h2>
+<p>GKE's official <code>cos_kernel_devenv</code> helper is pinned by Git revision. The public
+Arm release directory uses <code>toolchain.tar.xz.gcs</code>, while the helper's custom
+bucket path expects <code>toolchain_path</code>. The reviewed patch in
+<a href="../../assets/repository/kmods/matrix/cos-kernel-devenv-arm-bucket.patch"><code>cos-kernel-devenv-arm-bucket.patch</code></a>
+accepts both official descriptor layouts; it does not select an unpinned
+toolchain.</p>
+<p>UBI is a userspace container base and does not define the host kernel that will
+load a module. The UBI targets intentionally pair the exact current UBI 10.2
+toolchain image with an explicit EL10-compatible CentOS Stream 10 host ABI.
+They do not claim that every UBI workload runs that kernel. Production module
+selection remains an exact node-kernel match.</p>
+<p>RDMA does not change the <code>zcnblk_client_mod</code> ABI. EFA, Cloud RDMA/iRDMA, and
+InfiniBand examples live in the machine-profile lock because transport
+libraries and NIC setup are userspace/node concerns. They only reuse a module
+artifact after the exact kernel check succeeds.</p>
+<p>The current EKS standard, NVIDIA, and Neuron AMI types are recorded on each
+target. Where several AMI types use the same architecture and exact kernel ABI,
+they intentionally consume one module artifact. EKS 1.35 and 1.36 have distinct
+kernel ABIs, so both are independent build targets for amd64 and arm64.</p>
+<h2 id="ci-and-pin-refreshes">CI and pin refreshes</h2>
+<p><a href="../../assets/repository/.github/workflows/zcnblk-kmod-matrix.yml"><code>zcnblk-kmod-matrix.yml</code></a> builds
+all twelve targets on changes to the module, lock, recipe, or Helm copy. The CI
+job list is derived directly from <code>targets.json</code>, so a target cannot be added to
+the lock without joining the build. It also runs weekly so removed packages or
+changed provider publication layouts fail visibly. amd64 COS cross-compiles the
+GKE Arm target; the other Arm jobs use native GitHub Arm runners.</p>
+<p><a href="../../assets/repository/.github/workflows/zcblock-csi-images.yml"><code>zcblock-csi-images.yml</code></a> runs the
+same locked builds before publishing. Its amd64 and arm64 jobs download all
+matrix outputs, reject missing, stale-source, wrong-ELF, wrong-vermagic, or
+wrong-lock artifacts, and bundle only the matching architecture into the same
+multi-architecture DaemonSet image that contains the CSI and Rust node loader.</p>
+<p>To refresh the lock:</p>
+<ol>
+<li>Read the current provider/stable-channel sources and update
+<code>researchedAt</code>, release identifiers, digests, package versions, kernel
+releases, and URLs together.</li>
+<li>Confirm every machine profile still points at a compatible candidate ABI.</li>
+<li>Build all targets locally or dispatch the complete CI matrix.</li>
+<li>Inspect every <code>vermagic.txt</code> and <code>target-lock.json</code>; do not accept a nearby
+kernel release.</li>
+<li>On a real node, the loader must independently compare the artifact with
+<code>uname -m</code> and <code>uname -r</code> before loading it.</li>
+</ol>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#local-builds-without-cloud-resources">Local builds without cloud resources</a><a href="#platform-details">Platform details</a><a href="#ci-and-pin-refreshes">CI and pin refreshes</a></nav></div></body></html>

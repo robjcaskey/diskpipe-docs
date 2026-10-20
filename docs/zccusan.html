@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>zccusan · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zccusan">zccusan</h1>
+<p><code>zccusan</code> means Zero Copy Cinematic Universe Storage Area Network.</p>
+<p>It is the umbrella idiom for this repo's storage stack. The stack has a strict
+chain of being:</p>
+<ol>
+<li>descriptor zero-copy primitives;</li>
+<li>zero-copy streams;</li>
+<li>zero-copy WALs, including WALs of WALs;</li>
+<li><code>zcvolume</code> abstractions;</li>
+<li><code>zcsan</code>, the Zero Copy Storage Area Network layer;</li>
+<li><code>zccsi</code>, the convenience Kubernetes CSI adapter.</li>
+</ol>
+<p>The dependency direction only points downward. <code>zccsi</code> can translate Kubernetes
+CSI RPCs into <code>zcsan</code>/zccusan control calls, but CSI must not become the place
+where stream, WAL, volume, SAN, topology, tenant, or replication semantics live.
+Those belong to zccusan below it.</p>
+<h2 id="shape">Shape</h2>
+<ul>
+<li>descriptor primitives: buffers, leases, slices, topology metadata, release
+accounting, and versioned frame contracts.</li>
+<li>zero-copy streams: ordered descriptor carriers, fanout/fanin, stream release,
+encryption framing, and later WebSocket or descriptor-native transport.</li>
+<li>zero-copy WALs: durable extent records, WAL snapshots, WAL catch-up, and
+WALs of WALs for composed replication domains.</li>
+<li><code>zcvolume</code>: a block/image volume abstraction with snapshot and replication
+identity independent of Kubernetes.</li>
+<li><code>zcsan</code>: the storage area network layer that owns placement, streams,
+replication, token buckets, topology, tenants, and gateway coordination.</li>
+<li><code>zccsi</code>: a convenience adapter that maps Kubernetes PV/PVC/VolumeSnapshot
+objects onto zcsan operations.</li>
+<li><code>zccusan</code> local agent: the node-local process that owns state directories,
+device paths, snapshot images, freeze barriers, and stream jobs. Today this is
+implemented by <code>zcblock-control</code>.</li>
+</ul>
+<h2 id="block-boundary">Block Boundary</h2>
+<p>zccusan has one custom fabric-facing block device family: <code>/dev/zcnblk0</code>, backed
+by the <code>zcnblk</code> wire protocol today. It is the block-speaking onramp for fio,
+filesystems, databases, and CSI consumers. Target-side storage is a userspace
+service. A target may choose ordinary files, allowlisted raw devices, or
+optional <code>/dev/zcbrdN</code> RAM media as last-hop backing, but custom zc block
+devices are not the place where SAN topology lives.</p>
+<p>Mirroring, striping, forwarding, tier admission, tier spill, snapshot COW/WAL
+resolution, compaction placement, and replica fanin/fanout are userspace
+zccusan/gateway policy. Kernel block code should only expose the fabric edge or
+act as optional final media behind a userspace target.</p>
+<h2 id="zccsi-rule">zccsi Rule</h2>
+<p>The CSI driver is <code>zccsi</code>: an adapter. It must stay replaceable by another
+client that uses the same zccusan protocol.</p>
+<p>That means CSI should:</p>
+<ul>
+<li>validate and translate CSI requests into zccusan operations;</li>
+<li>keep CSI idempotency and Kubernetes object mapping local to the adapter;</li>
+<li>use the zccusan OpenAPI client for snapshots, streams, and later volume
+lifecycle operations;</li>
+<li>leave data movement to zccusan libraries/agents rather than shelling out to
+commands;</li>
+<li>avoid becoming the only place where storage policy, tenancy, topology, or WAL
+replication semantics exist.</li>
+</ul>
+<h2 id="upgrade-rule">Upgrade Rule</h2>
+<p>The zccusan protocol is versioned independently from CSI. Kubernetes CRD and CSI
+sidecar upgrades can stair-step through Helm-rendered manifests, but the control
+protocol itself must support an N-1 rollout path for agents and clients. New
+features should be additive in OpenAPI first, then made mandatory only after all
+participating agents can serve the previous version.</p>
+<h2 id="durable-state-logstream">Durable State Logstream</h2>
+<p><code>zcblock-control</code> now stores zccusan state transitions in a durable logstream.
+The local implementation is file-backed at
+<code>$stateDir/logstream/zccusan-state.log</code> unless <code>--logstream-path</code> or
+<code>ZCCUSAN_LOGSTREAM_PATH</code> is set.</p>
+<p>Each append is a framed, checksummed, fsynced record. Records carry a
+monotonic sequence, byte offset, stream name, event kind, key, JSON payload, and
+a <code>term</code> field reserved for the later Raft-backed implementation. On startup
+the local agent replays snapshot create/delete events back into the materialized
+snapshot state files, so the existing file layout remains an index rather than
+the only source of truth.</p>
+<p>For tests and operators, <code>GET /v1/logstream</code> replays the current node-local log.
+This is intentionally a zccusan control API, not a CSI API; CSI is just one
+client that causes state transitions.</p>
+<h2 id="live-replication-switching">Live Replication Switching</h2>
+<p>The local control API has two durable replication policy surfaces:</p>
+<ul>
+<li><code>PUT /v1/replication/modes</code> switches a scope between <code>async</code> and <code>sync</code>.</li>
+<li><code>PUT /v1/replication/routes</code> switches a scope to a target cluster, gateway
+endpoint, and spillover tier.</li>
+</ul>
+<p>Both append to the durable state log before updating live in-memory stream job
+metadata. Route changes do not contact the old gateway endpoint, so a volume can
+be train-track-switched away from an unresponsive target. Today this is the
+control-plane contract; snapshot transfer uses the existing stream replication
+path, and WAL catch-up becomes real when the WAL/gateway journal primitives land.</p>
+<h2 id="snapshot-devices-and-compaction">Snapshot Devices And Compaction</h2>
+<p>Point-in-time snapshots can be registered as read-only fabric snapshot exports
+via <code>POST /v1/snapshot-devices</code>. The requested <code>mode</code> is explicit: <code>cow</code> or
+<code>wal</code>, but that mode is resolved by the userspace fabric target/gateway. There
+are no separate <code>zccowsnap</code> or <code>zcwalsnap</code> kernel providers, and the controller
+does not fall back to loop devices, copied restore volumes, or other short-term
+substitutes.</p>
+<p>Snapshot compaction is tracked as a workflow, not just a local kernel command:</p>
+<ul>
+<li><code>strategy=stream-rewrite</code> is the default. The compactor streams data off the
+machine, then streams the compacted representation back into the new location.</li>
+<li><code>strategy=in-place</code> means a userspace worker compacts the current placement
+locally and reports the same small registered state.</li>
+<li><code>PUT /v1/compactions/{jobId}</code> lets the worker register the small control-plane
+state we need to remember: phase, outbound/inbound stream ids, byte counters,
+target location, worker id, and a compact checkpoint/watermark.</li>
+</ul>
+<p>Bulk data stays on the zccusan stream path. The compaction endpoint is only for
+durable job state and operator visibility.</p>
+<p>Replication progress is visible through two read paths:</p>
+<ul>
+<li><code>GET /v1/stats</code> returns the general monitoring summary plus hierarchical
+placement and logical-volume trees. Use <code>summary.attention_required</code> as the
+master internal signal, then drill into <code>hierarchy.placement</code> or
+<code>hierarchy.logical</code> only when an operator needs target/tier/volume/replica
+detail. It also includes the current compaction jobs so snapshot COW/WAL debt
+is visible from the same broad endpoint.</li>
+<li><code>GET /v1/replication/delay</code> returns JSON samples with current bytes,
+configured byte limit, remaining bytes, elapsed milliseconds, and idle
+milliseconds since the last observed byte progress.</li>
+<li><code>GET /metrics</code> exposes the master <code>zccusan_replication_attention_required</code>
+signal plus the same job progress as Prometheus-compatible text gauges under
+<code>zccusan_replication_job_*</code>. Job metrics keep the raw <code>subject</code> label and
+also derive explicit <code>stream_kind</code>, <code>volume_id</code>, and <code>snapshot_id</code> labels so
+volume and snapshot traffic can be queried separately.</li>
+</ul>
+<h2 id="day-1-monitoring">Day-1 Monitoring</h2>
+<p>Start with one page-level question: is there anything I need to look at?</p>
+<p>The controller computes that answer internally. For Prometheus, alert on the
+single label-free master signal:</p>
+<pre><code class="language-promql">zccusan_replication_attention_required == 1
+</code></pre>
+<p>If a deployment wants the minimum split without volume-level cardinality, watch
+<code>zccusan_replication_attention_failed_jobs</code> and
+<code>zccusan_replication_attention_idle_jobs</code>. The idle side uses the controller's
+published <code>zccusan_replication_attention_idle_threshold_seconds</code> value. Today
+that threshold is 30 seconds.</p>
+<p>When the alert fires, fetch the single programmatic drill-down endpoint:</p>
+<pre><code class="language-sh">curl -fsS http://127.0.0.1:9788/v1/stats
+</code></pre>
+<p>Read <code>summary</code> first. <code>summary.attention_required</code> is the same master signal as
+the metric. <code>summary.attention_failed_jobs</code> and <code>summary.attention_idle_jobs</code>
+explain the broad reason. Only then drill into <code>hierarchy.placement</code> to find the
+target cluster, spillover tier, or gateway endpoint, or into
+<code>hierarchy.logical</code> to see which logical volume or snapshot replica is affected.</p>
+<h2 id="helm-rule">Helm Rule</h2>
+<p>The Helm chart is only a rendering mechanism for ordinary Kubernetes resources.
+There are no Helm hooks. Stair-step upgrades should work with:</p>
+<pre><code class="language-sh">helm template RELEASE zccusan/charts/zcblock-csi --namespace NAMESPACE | kubectl apply -f -
+kubectl -n NAMESPACE rollout status daemonset/RELEASE-node
+</code></pre>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#shape">Shape</a><a href="#block-boundary">Block Boundary</a><a href="#zccsi-rule">zccsi Rule</a><a href="#upgrade-rule">Upgrade Rule</a><a href="#durable-state-logstream">Durable State Logstream</a><a href="#live-replication-switching">Live Replication Switching</a><a href="#snapshot-devices-and-compaction">Snapshot Devices And Compaction</a><a href="#day-1-monitoring">Day-1 Monitoring</a><a href="#helm-rule">Helm Rule</a></nav></div></body></html>

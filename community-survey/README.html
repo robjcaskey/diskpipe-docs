@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>ZCCUSAN Community Survey (Terraform + Lambda + Aurora DSQL) · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="zccusan-community-survey-terraform--lambda--aurora-dsql">ZCCUSAN Community Survey (Terraform + Lambda + Aurora DSQL)</h1>
+<p>Provision this stack with Terraform:</p>
+<pre><code class="language-bash">cd zccusan/community-survey/terraform
+terraform init
+terraform apply
+</code></pre>
+<p>The API endpoint is exposed as <code>survey_post_url</code> for <code>POST</code> payloads at <code>/survey</code>.</p>
+<pre><code class="language-bash">curl -X POST "$SURVEY_POST_URL" \
+  -H 'content-type: application/json' \
+  -d '{"events":[
+    {"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"aws","cloud_region":"us-east-1","anonymous_installation_id":"anon-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_volume_count":2,"total_iops":1200},
+    {"telemetry_schema_version":2,"anonymization_schema_version":2,"event_type":"csi_hourly_stats","cloud_provider":"gcp","cloud_region":"us-central1","anonymous_installation_id":"anon-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","active_volume_count":1,"total_iops":400}
+  ]}'
+</code></pre>
+<p>A single-event body is still supported.</p>
+<p>The production stack also exposes a privacy-filtered community dashboard at
+the Terraform <code>dashboard_url</code> output. Raw normalized events remain in an
+append-only JSONB table so projections can be repaired or replayed later. The
+dashboard and its <code>/community/environments</code> API never return those raw events,
+source-IP hashes, node identifiers, volume identifiers, or private environment
+identifiers. Environments appear under stable one-way aliases and are divided
+into active and historical views using their last sanitized heartbeat.</p>
+<p>Pulse reports <code>frontend</code> as the I/O submission boundary, independently of the
+network <code>transport</code> and the deployment/control plane. <code>userspace-client</code> and
+<code>linux-block</code> distinguish the direct library path from <code>/dev/zcnblk0</code>.
+Virtual-machine data paths should prefer the concrete label (<code>qemu-virtio-blk</code>,
+<code>qemu-virtio-scsi</code>, <code>qemu-nvme</code>, or <code>vhost-user-blk</code>); <code>libvirt-disk</code> is kept as
+a compatibility label when the hypervisor interface is unavailable. Likewise,
+<code>kubernetes-csi</code> describes a CSI-observed session, not a claim that CSI is on
+the I/O hot path. Benchmark records include <code>io_size_bytes</code>, so IOPS measured
+at different request sizes remain visibly distinct.</p>
+<p>Deployed environments:</p>
+<ul>
+<li>Development: <code>https://g94w93q6w7.execute-api.us-east-1.amazonaws.com</code></li>
+<li>Production: <code>https://vdq4ma9dl2.execute-api.us-east-1.amazonaws.com</code></li>
+</ul>
+<p>Each has independent API Gateway, Lambda, request-metered Aurora DSQL, and
+Terraform state. The Helm community-survey values profiles select the corresponding
+<code>/survey</code> endpoint. DSQL has no database instances, capacity floor, pause, or
+resume delay; idle clusters consume zero DPUs.</p>
+<h2 id="success-response-shape">Success response shape</h2>
+<p><code>{"ok":true,"accepted":2,"event_ids":[...],"legacy_event_id":null}</code></p>
+<p>This uses:</p>
+<ul>
+<li>AWS Lambda (Python runtime)</li>
+<li>HTTP API Gateway route</li>
+<li>Aurora DSQL (PostgreSQL-compatible wire protocol, request-metered DPUs)</li>
+<li>IAM database authentication with short-lived connection tokens</li>
+</ul>
+<h2 id="endpoint-contract">Endpoint contract</h2>
+<p>Telemetry and the community survey are separate APIs:</p>
+<ul>
+<li><code>ZCCUSAN_TELEMETRY_API_ENDPOINT</code> is the event-ingestion API selected by an
+operator. When it is set, edge processes send telemetry only there and do not
+directly participate in the community survey. The telemetry service decides
+whether it will participate indirectly.</li>
+<li><code>ZCCUSAN_COMMUNITY_SURVEY_API_ENDPOINT</code> is used only for community-survey
+submission. It never doubles as a telemetry endpoint.</li>
+<li><code>ZCCUSAN_COMMUNITY_SURVEY_ENABLED=false</code> disables direct community
+participation and collector export without disabling local telemetry.</li>
+</ul>
+<p>Example:</p>
+<pre><code class="language-bash">export ZCCUSAN_TELEMETRY_API_ENDPOINT="http://zccusan-telemetry:9899/v1/events"
+export ZCCUSAN_COMMUNITY_SURVEY_ENABLED=false
+</code></pre>
+<p>The telemetry server logs every accepted raw event to stdout as one-line NDJSON.
+Before any community HTTPS request leaves the installation, Rust converts each
+mixed-version <code>TelemetryRecord</code> into the private-field
+<code>NonIdentifyingTelemetry</code> type. The transformation replaces the installation ID
+with a domain-separated SHA-256 alias, retains only explicitly safe aggregate
+fields such as cloud provider, region, version, volume count, and IOPS, and
+omits node IDs, volume IDs, paths, errors, and unknown fields. The community API
+rejects records outside that versioned allowlist and never persists source IPs.</p>
+<p>Edge publishers reject events larger than 4 KiB, use a nonblocking in-memory
+enqueue, and perform DNS and HTTP work only on a background thread. They abandon
+failed delivery eagerly. Explicit publisher shutdown waits no more than 1.5
+seconds for a final flush, including DNS failure, a slow acknowledgement, or a
+trickle-fed response; telemetry never delays a data-path operation.</p>
+<p>The in-cluster telemetry server has different retry semantics. It retains
+unacknowledged events in a bounded 4 MiB memory ring and retries non-2xx and
+network failures indefinitely. Every accepted event gets a monotonically
+increasing <code>_zccusan_message_index</code> and is written to stdout before its handler
+exits. If the ring fills, the server evicts its oldest unacknowledged records,
+logs a <code>telemetry_buffer_overflow</code> event containing the exact evicted index
+range that had no successful upstream acknowledgement at eviction time, states
+that the original NDJSON copies were already emitted to stdout, queues that
+anonymized form of that overflow event for the community survey, and only then
+appends the new event.
+Inputs larger than 4 KiB receive HTTP 413 when no event
+from the request can be accepted; mixed batches report their rejected count.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#success-response-shape">Success response shape</a><a href="#endpoint-contract">Endpoint contract</a></nav></div></body></html>
