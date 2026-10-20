@@ -41,8 +41,11 @@ workflow. The workflow is <code>.github/workflows/docs-site.yml</code>.</p>
 <code>robjcaskey/diskpipe-docs</code> Pages repository and its <code>gh-pages</code> branch.
 <code>scripts/publish-diskpipe-docs.sh</code> copies the generated manifest, publishes
 nested pages and removes previously generated pages that have been deleted.
-It preserves <code>CNAME</code>, repository configuration and the HTTPS provisioning
-workflow. A repository-scoped deploy key is stored in the source repository's
+It removes the legacy Pages <code>CNAME</code> and preserves repository configuration.
+CloudFront serves the public apex and www names with an ACM certificate, while
+Pages retains its default <code>robjcaskey.github.io/diskpipe-docs/</code> origin URL.
+A custom domain on Pages would redirect origin requests back to CloudFront;
+do not restore <code>CNAME</code> or set a Pages custom domain. A repository-scoped deploy key is stored in the source repository's
 <code>DISKPIPE_DOCS_DEPLOY_KEY</code> Actions secret.</p>
 <p>The independent <a href="https://robjcaskey.github.io/zcutils/">zcutils site</a> retains its
 small curated landing-page set. Its publisher preserves Helm chart archives,
