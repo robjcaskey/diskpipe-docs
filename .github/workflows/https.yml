@@ -1,0 +1,45 @@
+name: Finish Diskpipe HTTPS provisioning
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+permissions:
+  contents: read
+  pages: write
+  actions: write
+concurrency:
+  group: diskpipe-https-provisioning
+  cancel-in-progress: false
+jobs:
+  finish-https:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Enable HTTPS when the registration and certificate are ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Wait for public delegation before asking Pages to issue a certificate.
+          if ! python3 - <<'PY'
+          import socket
+          expected = {'185.199.108.153', '185.199.109.153', '185.199.110.153', '185.199.111.153'}
+          try:
+              addresses = {r[4][0] for r in socket.getaddrinfo('diskpipe.com', 443, socket.AF_INET)}
+          except socket.gaierror:
+              raise SystemExit(1)
+          raise SystemExit(0 if addresses and addresses <= expected else 1)
+          PY
+          then
+            echo 'Domain registration or DNS propagation is still pending.'
+            exit 0
+          fi
+          if gh api --method PUT "repos/${GH_REPO}/pages" -F https_enforced=true; then
+            echo 'HTTPS is enforced; disabling this one-time provisioning workflow.'
+            gh workflow disable https.yml --repo "${GH_REPO}"
+          else
+            echo 'Certificate is not ready yet; request a build and retry on schedule.'
+            gh api --method POST "repos/${GH_REPO}/pages/builds" --jq '{status,url}'
+          fi
