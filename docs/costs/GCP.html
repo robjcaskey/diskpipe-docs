@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Google Cloud cost model for Diskpipe trials · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="google-cloud-cost-model-for-diskpipe-trials">Google Cloud cost model for Diskpipe trials</h1>
+<p>Start with the <a href="../../docs/COST_CONTROL.html">general cost-control guide</a>. Prefer existing
+capacity and a single-region trial over a new cluster. Cross-region evaluation
+and public internet storage traffic are excluded until the user explicitly
+approves a costed plan.</p>
+<h2 id="cluster-and-storage">Cluster and storage</h2>
+<p>GKE pricing distinguishes cluster management from workload resources. Standard
+and Autopilot use different resource billing models; identify the existing
+cluster mode before estimating the incremental trial cost. Check eligibility
+before assuming credits apply. Use <a href="https://cloud.google.com/kubernetes-engine/pricing">GKE pricing</a>.</p>
+<p>Persistent Disk and Hyperdisk have different capacity and performance pricing.
+Check the disk type, regional versus zonal configuration, provisioned capacity,
+and any independently charged performance. Include snapshots and images when
+used. Read <a href="https://cloud.google.com/compute/disks-image-pricing">disk and image pricing</a>.</p>
+<p>Offer suitable user-provisioned disks only where the documented configuration
+supports them. Record their project, zone or region, IDs, performance settings,
+and ownership. Compare total cost and access patterns before using block storage
+as a midline or farline tier.</p>
+<h2 id="network-path">Network path</h2>
+<p>Google Cloud distinguishes same-zone, cross-zone, cross-region, and internet
+transfer. The address type, VPC relationship, destination, and network service
+can affect the applicable pricing. Do not infer a free path simply because both
+endpoints are in Google Cloud. Consult <a href="https://cloud.google.com/vpc/network-pricing">VPC network pricing</a>.</p>
+<p>For each proposed path, record source and destination locations, addresses,
+expected bytes, and any NAT, load-balancing, or connectivity services. Research
+their service-specific processing and runtime charges in addition to transfer.
+Keep the default storage workload on a verified private path; present alternatives
+if that requires additional paid infrastructure.</p>
+<h2 id="build-the-estimate">Build the estimate</h2>
+<p>Separate existing committed capacity from new charges. Include incremental
+workload resources, disk capacity and performance, snapshots, network bytes,
+intermediaries, and logs. Estimate initial loading, replication, reads, recovery,
+and tier retrieval. Record current price sources, assumptions, trial duration,
+and the ongoing cost if resources remain.</p>
+<h2 id="cleanup-evidence">Cleanup evidence</h2>
+<p>Ask whether the user is ready to clean up at each natural stopping point. After
+approved teardown, inspect created resource types in each project and location
+used. Check retained disks, snapshots, images, addresses, forwarding rules,
+load-balancing resources, routers or NAT configuration, and logs as applicable.
+Preserve shared resources and pre-existing infrastructure. Report leftovers and
+exact cleanup steps; successful Kubernetes or Terraform teardown is only part
+of the evidence.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#cluster-and-storage">Cluster and storage</a><a href="#network-path">Network path</a><a href="#build-the-estimate">Build the estimate</a><a href="#cleanup-evidence">Cleanup evidence</a></nav></div></body></html>

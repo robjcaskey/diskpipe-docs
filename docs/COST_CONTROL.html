@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Cost control for Diskpipe trials · Diskpipe</title><link rel="stylesheet" href="../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../index.html">Diskpipe</a><a href="../kubernetes.html">With Kubernetes</a><a href="../standalone.html">Without Kubernetes</a><a href="../day-2.html">Day-two operations</a><a href="../universe.html">Zero Copy Cinematic Universe</a><a href="../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="cost-control-for-diskpipe-trials">Cost control for Diskpipe trials</h1>
+<p>Use this guide before installing, expanding, benchmarking, or tearing down a
+Diskpipe trial. It applies both to people following the documentation and to AI
+agents working on their behalf. A request to try Diskpipe does not by itself
+approve new infrastructure spending.</p>
+<h2 id="provider-cost-models">Provider cost models</h2>
+<p>Use the relevant provider page alongside this guide. These pages explain what
+to price and link to official sources; they are not fixed-price quotes.</p>
+<ul>
+<li><a href="../docs/costs/AWS.html">AWS</a>: EBS capacity and performance, transfer paths, and VPC costs.</li>
+<li><a href="../docs/costs/GCP.html">Google Cloud</a>: GKE billing modes, disk choices, and network paths.</li>
+<li><a href="../docs/costs/AZURE.html">Azure</a>: AKS tiers, Managed Disks, and bandwidth rules.</li>
+</ul>
+<h2 id="start-with-what-already-exists">Start with what already exists</h2>
+<p>Look for existing Kubernetes contexts or suitable hosts first. Inspect their
+capacity, permissions, storage classes, region, and availability zones without
+changing resources. Propose a target and confirm it with the user, along with a
+dedicated trial namespace or equivalent resource boundary.</p>
+<p>For a cloud trial, recommend one region and a small disposable workload. Do not
+create a cluster by default. Reusing capacity can reduce incremental cost, but
+check whether the trial would trigger autoscaling, higher provisioned capacity,
+or other additional charges.</p>
+<h2 id="agree-on-the-spending-profile">Agree on the spending profile</h2>
+<p>Before creating billable resources or increasing capacity, confirm:</p>
+<ul>
+<li>The trial budget, currency, and expected duration.</li>
+<li>Existing resources to reuse and new resources to create.</li>
+<li>Expected data volume, request rate, and transfer volume.</li>
+<li>Estimated incremental trial cost and ongoing cost if resources remain running.</li>
+<li>When to stop, which resources to clean up, and who owns cleanup.</li>
+</ul>
+<p>Research current provider pricing for the actual region, resource configuration,
+and network path. Record the pricing source, date, billing units, assumptions,
+and unknowns. Do not assume free-tier eligibility, discounts, or unused quotas.
+If a cost cannot be established, explain the uncertainty before asking the user
+to approve it. Reconfirm the spending profile when the plan changes.</p>
+<p>A budget alert is useful, but do not treat it as an enforced spending cap unless
+the environment actually provides and configures that enforcement.</p>
+<h2 id="review-the-major-cost-drivers">Review the major cost drivers</h2>
+<div class="table-scroll"><table><thead><tr><th>Driver</th><th>What to check</th></tr></thead><tbody>
+<tr><td>Compute and cluster services</td><td>Additional nodes, autoscaling, control-plane charges, instance size, and idle runtime.</td></tr>
+<tr><td>Block storage</td><td>Allocated capacity, provisioned IOPS and throughput, minimum billing periods, and retained volumes.</td></tr>
+<tr><td>Snapshots and object storage</td><td>Retention, request counts, retrieval, minimum storage duration, and restore costs.</td></tr>
+<tr><td>Networking</td><td>Transfer direction, availability-zone and region boundaries, internet egress, NAT processing, private endpoints, transit services, and load balancers.</td></tr>
+<tr><td>Observability</td><td>Log ingestion, retention, high-cardinality metrics, and tracing volume.</td></tr>
+<tr><td>Supporting services</td><td>Fixed and usage-based charges for identity, certificate, DNS, and other services proposed by the setup.</td></tr>
+</tbody></table>
+</div>
+<p>Avoid adding paid supporting services merely to run a small trial. For example,
+do not provision a private certificate authority, managed identity service, NAT
+gateway, or load balancer without explaining why it is needed and obtaining
+approval for its costs.</p>
+<h2 id="research-bandwidth-before-moving-data">Research bandwidth before moving data</h2>
+<p>Map the actual data path, including both endpoints, their regions and zones, and
+any gateways or endpoints in between. Research the provider's pricing for that
+path. Private connectivity and same-region traffic must not be assumed free.</p>
+<p>Estimate bytes and charges for initial loading, replicas, reads, benchmarks,
+retries, recovery, tiering, and any transfers needed during cleanup. Include
+per-request and processing charges where applicable. Record the calculation so
+the user can adjust the workload size and duration.</p>
+<p>Treat cross-region evaluation as too expensive for the default trial budget.
+Exclude it unless the user explicitly opts in after reviewing the estimated
+cost. Selecting an add-region workflow expresses interest; it does not approve
+an unknown bill.</p>
+<p>Likewise, exclude storage, replication, and benchmark traffic across the public
+internet unless the user explicitly opts in after reviewing the bandwidth costs.
+This restriction concerns the storage workload being evaluated; ordinary
+documentation and package downloads are separate.</p>
+<p>Use verified private network paths within one region by default. Prefer avoiding
+cross-zone transfer charges for a basic trial where practical, and explain that
+co-locating resources does not validate resilience to an availability-zone outage.
+If a suitable private path is unavailable, present costed alternatives rather
+than silently switching to public endpoints. Encrypted traffic still needs the
+same routing and cost review.</p>
+<h2 id="offer-economical-storage-choices">Offer economical storage choices</h2>
+<p>Where the documented configuration supports it, gently favor suitable
+cloud-provided block volumes that the user can provision and supply themselves.
+Offer existing unused capacity only after confirming ownership and intended use.
+Explain the tradeoffs against dynamically provisioned storage; manual provisioning
+does not inherently lower the provider's storage price.</p>
+<p>Discuss whether cloud block storage is an appropriate midline or farline tier
+for the workload. Compare capacity, performance, access frequency, retrieval,
+network transfer, retention, and operational costs. Do not promise a storage tier
+or integration that the implementation does not support.</p>
+<p>Follow the <a href="../docs/GETTING_STARTED_WITH_TIERING_ON_KUBERNETES.html">tiering guide</a> and the
+actual installation prerequisites. The
+<a href="../docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html">Kubernetes quickstart</a> uses a
+volatile-memory example; distinguish that demo from a persistent-storage setup.
+Never format or overwrite an existing volume without explicit confirmation.
+Userspace storage stages retain placement and replication responsibilities;
+block devices are terminal media, not mirror or stripe primitives.</p>
+<h2 id="keep-cleanup-in-the-conversation">Keep cleanup in the conversation</h2>
+<p>Keep an inventory of resources created or changed, including provider IDs,
+region, namespace, owner, purpose, ongoing charges, retention settings, and
+cleanup procedure. Distinguish trial-owned resources from pre-existing resources.</p>
+<p>At every natural stopping point, after validation, and before ending the session,
+ask whether the user is done and ready to clean up. Name what would be removed,
+what data would be lost, and what would continue costing money. If the trial
+continues, ask again at the next stopping point. Respect an explicit decision to
+keep it and agree on the expected duration and remaining spend.</p>
+<p>Do not claim future reminders or automatic teardown are scheduled unless they
+have actually been configured. An absent response is not permission to delete.</p>
+<h2 id="verify-teardown-including-retained-resources">Verify teardown, including retained resources</h2>
+<p>After cleanup is authorized, remove only the agreed trial resources. Preserve
+pre-existing clusters, volumes, networks, and workloads unless their removal is
+explicitly authorized.</p>
+<p>Check PVC and PV reclaim policies before deleting claims. Review every resource
+type the trial created: volumes, snapshots, nodes, load balancers, addresses,
+gateways, endpoints, log groups, certificates, and any other supporting resources.
+Use the inventory and provider reads to identify leftovers and their owners.</p>
+<p>A successful Terraform destroy or namespace deletion is not sufficient evidence
+that no billable resources remain. Inspect each created resource type afterward,
+including retained or separately provisioned resources. Do not delete unrelated
+resources found during an account-wide search.</p>
+<p>Report what was removed, what remains, why it remains, its ongoing costs or
+pricing uncertainty, and exact cleanup steps. Separate successful resource
+removal from billing confirmation: usage already incurred may appear later.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#provider-cost-models">Provider cost models</a><a href="#start-with-what-already-exists">Start with what already exists</a><a href="#agree-on-the-spending-profile">Agree on the spending profile</a><a href="#review-the-major-cost-drivers">Review the major cost drivers</a><a href="#research-bandwidth-before-moving-data">Research bandwidth before moving data</a><a href="#offer-economical-storage-choices">Offer economical storage choices</a><a href="#keep-cleanup-in-the-conversation">Keep cleanup in the conversation</a><a href="#verify-teardown-including-retained-resources">Verify teardown, including retained resources</a></nav></div></body></html>

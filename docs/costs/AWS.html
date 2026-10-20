@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>AWS cost model for Diskpipe trials · Diskpipe</title><link rel="stylesheet" href="../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../index.html">Diskpipe</a><a href="../../kubernetes.html">With Kubernetes</a><a href="../../standalone.html">Without Kubernetes</a><a href="../../day-2.html">Day-two operations</a><a href="../../universe.html">Zero Copy Cinematic Universe</a><a href="../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="aws-cost-model-for-diskpipe-trials">AWS cost model for Diskpipe trials</h1>
+<p>Start with the <a href="../../docs/COST_CONTROL.html">general cost-control guide</a>. Reuse an existing
+cluster or host, agree on the spending profile, and keep the default trial in one
+region on verified private network paths. Cross-region evaluation and public
+internet storage traffic require explicit approval of their estimated costs.</p>
+<h2 id="storage">Storage</h2>
+<p>EBS bills provisioned capacity until it is released. Depending on the volume
+type, provisioned IOPS and throughput can add separate charges. For gp3, compare
+the included performance with the additional performance requested; do not pay
+for benchmark headroom the trial will not use. Snapshots have their own pricing.
+Check the selected region and volume type in <a href="https://aws.amazon.com/ebs/pricing/">EBS pricing</a>.</p>
+<p>Offer user-provisioned EBS capacity where the documented Diskpipe setup supports
+it. Record the volume ID, availability zone, size, performance settings, owner,
+and intended deletion policy. Compare the complete cost before choosing it as a
+midline or farline tier; manual provisioning alone does not change the rate.</p>
+<h2 id="network-path">Network path</h2>
+<p>Price each direction of the actual transfer. Same-region cross-zone traffic,
+inter-region transfer, and internet egress have distinct rules. Service-specific
+exceptions matter; do not apply one EC2 rate to every AWS service. Use
+<a href="https://aws.amazon.com/ec2/pricing/on-demand/">EC2 data-transfer pricing</a>
+and the <a href="https://docs.aws.amazon.com/cur/latest/userguide/cur-data-transfers-charges.html">billing guide to transfer charges</a>.</p>
+<p>NAT gateways have time and data-processing charges, and public IPv4 addresses
+can add ongoing charges. Research these separately from bandwidth in
+<a href="https://aws.amazon.com/vpc/pricing/">VPC pricing</a>. Inspect routes before assuming
+that a private subnet provides a cheap private data path.</p>
+<h2 id="build-the-estimate">Build the estimate</h2>
+<p>List incremental compute runtime, cluster charges if applicable, EBS capacity
+and performance, snapshots, transfer bytes by path, network intermediaries, and
+logs. Record the current rate source and estimate both trial-duration and
+left-running costs. Review any proposed private CA, managed identity service,
+load balancer, gateway, or endpoint separately before approving it.</p>
+<h2 id="cleanup-evidence">Cleanup evidence</h2>
+<p>Ask about cleanup at natural stopping points. After approved teardown, inspect
+every resource type created, including retained EBS volumes, snapshots, load
+balancers, public addresses, gateways, endpoints, and log groups. Check the
+actual account and regions used. Preserve pre-existing resources. Report any
+remaining resources, ongoing costs, and exact removal steps.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#storage">Storage</a><a href="#network-path">Network path</a><a href="#build-the-estimate">Build the estimate</a><a href="#cleanup-evidence">Cleanup evidence</a></nav></div></body></html>

@@ -43,6 +43,7 @@ deploy/zcblock-csi/fips/REPRODUCIBILITY-ADMISSION.html
 deploy/zcblock-csi/fips/REPRODUCIBILITY-RESULT.template.html
 deploy/zcblock-csi/fips/reproduced/75c89bd43418/README.html
 docs/BUILD_KERNEL_MODULE.html
+docs/COST_CONTROL.html
 docs/GETTING_STARTED_WITH_A_MACOS_FEDERATED_REGION.html
 docs/GETTING_STARTED_WITH_CROSS_REGION_FAILOVER_ON_KUBERNETES.html
 docs/GETTING_STARTED_WITH_CROSS_REGION_POLICY_ON_KUBERNETES.html
@@ -53,6 +54,9 @@ docs/GETTING_STARTED_WITH_UNTRUSTED_FEDERATION_STORAGE_ON_KUBERNETES.html
 docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES.html
 docs/GETTING_STARTED_WITH_ZCCUSAN_ON_KUBERNETES_DETAILED.html
 docs/VALIDATING_SINGLE_REGION_HA_ON_KUBERNETES.html
+docs/costs/AWS.html
+docs/costs/AZURE.html
+docs/costs/GCP.html
 docs/streaming-replication-shaping.html
 docs/zccusan.html
 index.html
