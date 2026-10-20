@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Diskpipe documentation and operating guides."><title>Diskpipe documentation HTTPS operations · Diskpipe</title><link rel="stylesheet" href="../../../site.css"></head><body><a class="skip" href="#content">Skip to content</a><header><a class="brand" href="../../../index.html">Diskpipe<span>STORAGE / OPERATIONS</span></a><nav class="header-links" aria-label="Project links"><a class="project-link" href="https://robjcaskey.github.io/zcutils/">zcutils docs ↗</a><a class="repo" href="https://github.com/robjcaskey/zcutils">Repository ↗</a></nav></header><div class="layout"><aside><p class="eyebrow">The guides</p><nav aria-label="Guides"><a href="../../../index.html">Diskpipe</a><a href="../../../kubernetes.html">With Kubernetes</a><a href="../../../standalone.html">Without Kubernetes</a><a href="../../../day-2.html">Day-two operations</a><a href="../../../universe.html">Zero Copy Cinematic Universe</a><a href="../../../index.html#documentation-library">All documentation</a></nav></aside><main id="content"><h1 id="diskpipe-documentation-https-operations">Diskpipe documentation HTTPS operations</h1>
+<p><code>https://diskpipe.com/</code> and <code>https://www.diskpipe.com/</code> use an AWS-issued public
+certificate through CloudFront. Both names serve the same documentation.
+HTTP requests redirect to HTTPS. CloudFront fetches the generated static files
+from GitHub Pages over HTTPS; publication remains GitHub Actions plus a
+repository-scoped deploy key, without AWS credentials in CI.</p>
+<h2 id="architecture-and-ownership">Architecture and ownership</h2>
+<p>The <a href="../../../assets/repository/infra/diskpipe-docs/main.tf">Terraform module</a> manages one non-exportable ACM public certificate
+in <code>us-east-1</code>, its DNS validation records, one shared-IP CloudFront distribution,
+an explicit Amazon CAA authorization, and the existing apex A/AAAA and www CNAME
+records. The existing Route53 hosted
+zone and domain registration remain outside this module. Domain registration,
+registrant contacts, privacy and annual renewal are not modified by Terraform.</p>
+<p>The origin is <code>https://robjcaskey.github.io/diskpipe-docs/</code>. CloudFront appends
+incoming paths to <code>/diskpipe-docs</code>, sends the origin host rather than the viewer
+host, and verifies GitHub's TLS certificate. The www CNAME points to <code>diskpipe.com</code>, whose A/AAAA aliases select CloudFront.
+The public browser connection uses
+the ACM certificate with <code>diskpipe.com</code> and <code>www.diskpipe.com</code> as its names.
+The distribution accepts read methods only, compresses responses, supports IPv6
+and requires modern TLS. Real missing pages remain 404s.</p>
+<p>GitHub Pages must have <strong>no custom domain</strong>. Its settings use <code>cname: null</code>, and
+the <code>gh-pages</code> repository must not contain a root <code>CNAME</code> file, even an empty one.
+Restoring that file can redirect the origin back through CloudFront. The
+publisher removes stale <code>CNAME</code> files instead of recreating them. The previous
+GitHub certificate-polling workflow remains disabled; ACM manages renewal using
+the retained DNS validation records.</p>
+<h2 id="expected-cost">Expected cost</h2>
+<p>Pricing checked against the linked AWS pages on October 19, 2026:</p>
+<ul>
+<li>The <a href="https://aws.amazon.com/certificate-manager/pricing/">ACM public certificate</a>
+has no certificate charge when used by CloudFront. Export is explicitly
+disabled. This module creates no AWS Private CA.</li>
+<li><a href="https://aws.amazon.com/cloudfront/pricing/">CloudFront pay-as-you-go</a> has no
+fixed distribution charge. Its monthly account-wide free allowance includes
+1 TB of data transfer out and 10 million HTTP/HTTPS requests. The allowance is
+shared with this account's other distributions; traffic above it is metered.
+Price Class 100 limits the selected edge regions. This is not a flat-rate
+subscription or a guaranteed zero total bill.</li>
+<li>The existing <a href="https://aws.amazon.com/route53/pricing/">Route53 public hosted zone</a>
+normally costs $0.50 per month for the first 25 zones. Apex A/AAAA aliases to
+CloudFront have no DNS query charge; www CNAME and validation/other DNS queries
+use standard DNS query pricing. No extra hosted zone is created.</li>
+<li>The existing domain registration was $16 for its first year. Annual renewal
+remains a separate registrar charge and follows the registrar's current price.</li>
+</ul>
+<p>There are no EC2 instances, load balancers, NAT gateways, S3 buckets, private CAs,
+paid WAF resources, dedicated-IP TLS, functions or log ingestion resources in
+this module. Cache expiry avoids routine invalidation requests. For a low-traffic
+docs site within the shared allowance, incremental certificate and delivery cost
+is expected to be $0; existing DNS and annual registration costs remain.</p>
+<h2 id="change-infrastructure">Change infrastructure</h2>
+<p>Use the existing protected state rather than initializing a second deployment.
+On the current operator workstation it is stored at
+<code>/home/rob/.local/state/diskpipe-docs/terraform.tfstate</code> outside the repository.
+The directory is accessible only by the operator. Retain a protected backup
+before migrating workstations or removing this checkout. Do not commit state,
+plans, credentials or <code>.terraform/</code> to Git.</p>
+<p>Run from this module directory, with an authenticated AWS profile:</p>
+<pre><code class="language-bash">export AWS_PROFILE=slopmud-breakglass
+terraform init -backend-config="path=/home/rob/.local/state/diskpipe-docs/terraform.tfstate"
+terraform fmt -check
+terraform validate
+terraform plan -out=/tmp/diskpipe-https.tfplan
+terraform apply /tmp/diskpipe-https.tfplan
+terraform output
+</code></pre>
+<p>Inspect the saved plan before applying it. The initial migration imported the
+existing records, then updated them in place; it did not create a second zone:</p>
+<pre><code class="language-bash">terraform import 'aws_route53_record.apex["A"]' Z02482853NUNWHLIEN98Q_diskpipe.com_A
+terraform import 'aws_route53_record.apex["AAAA"]' Z02482853NUNWHLIEN98Q_diskpipe.com_AAAA
+terraform import aws_route53_record.www Z02482853NUNWHLIEN98Q_www.diskpipe.com_CNAME
+</code></pre>
+<p>These import commands document the migration and are not needed with the
+existing state. If state must be recovered, inventory and import the existing
+ACM certificate, validation DNS records and CloudFront distribution as well;
+do not apply from an empty state against existing infrastructure.</p>
+<p>The initial ACM request failed because the old www CNAME pointed to
+<code>robjcaskey.github.io</code>, whose inherited CAA policy allows other certificate
+providers but excludes Amazon. The module points www at the apex, adds
+<code>0 issue "amazon.com"</code> at the apex, and orders certificate creation after these
+changes. <a href="https://docs.aws.amazon.com/acm/latest/userguide/troubleshooting-caa.html">AWS documents CAA requirements</a>.
+This keeps Amazon authorized for future renewals as well as initial issuance.
+A cached old CNAME may need its prior TTL to expire before a new request works.</p>
+<p>Terraform waits for certificate issuance, CloudFront deployment and DNS changes.
+Keep the ACM validation CNAMEs in DNS to allow automatic renewal. A routine
+follow-up <code>terraform plan -detailed-exitcode</code> should exit 0 with no changes.</p>
+<h2 id="publish-and-verify">Publish and verify</h2>
+<p>Commit Markdown and push to the source repository's <code>main</code> branch. The docs
+workflow validates links, renders all tracked Diskpipe Markdown plus linked
+shared docs, and pushes the generated files to <code>robjcaskey/diskpipe-docs</code> on
+<code>gh-pages</code>. Pages stays enabled on that branch with no custom domain. No
+Terraform apply is needed for documentation changes.</p>
+<p>CloudFront's cache is capped at five minutes; GitHub Pages build/deployment and
+its own caches can add their own publication delay. After GitHub Pages reports
+the new build, verify the origin and both public names:</p>
+<pre><code class="language-bash">curl --fail --show-error --silent https://robjcaskey.github.io/diskpipe-docs/ -o /tmp/diskpipe-origin.html
+bash infra/diskpipe-docs/verify-https.sh
+</code></pre>
+<p>Run the verification script from the repository root. It checks normal public
+DNS resolution and certificate trust, both hostnames, HTTP redirects, CSS and
+a nested documentation page. It does not disable certificate verification.
+For certificate inspection:</p>
+<pre><code class="language-bash">openssl s_client -connect diskpipe.com:443 -servername diskpipe.com &lt;/dev/null 2&gt;/dev/null | openssl x509 -noout -issuer -dates -ext subjectAltName
+</code></pre>
+<p>If a page is stale, compare the origin to the public site and allow the caches
+to expire. If the origin redirects to diskpipe.com, remove the Pages custom
+domain and root <code>CNAME</code>, then republish. If the public certificate fails, inspect
+ACM status in <code>us-east-1</code>, its DNS validation records and the deployed CloudFront
+certificate rather than enabling GitHub's separate certificate workflow.</p>
+<h2 id="retire-the-site">Retire the site</h2>
+<p>Move public DNS and validate the replacement HTTPS site before removing this
+module. A deliberate <code>terraform destroy</code> removes this module's CloudFront
+configuration, certificate and managed DNS records, including the imported
+apex/www records. It does not unregister the domain or delete its hosted zone;
+those keep their existing renewal and hosted-zone charges until managed
+separately. CloudFront disable/delete propagation can take several minutes.</p>
+<footer>Built from Markdown with Rust. No client-side dependencies.</footer></main><nav class="toc" aria-label="On this page"><p class="eyebrow">On this page</p><a href="#architecture-and-ownership">Architecture and ownership</a><a href="#expected-cost">Expected cost</a><a href="#change-infrastructure">Change infrastructure</a><a href="#publish-and-verify">Publish and verify</a><a href="#retire-the-site">Retire the site</a></nav></div></body></html>

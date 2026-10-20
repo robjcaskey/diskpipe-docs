@@ -4,6 +4,7 @@ assets/repository/.github/workflows/zcblock-csi-images.yml
 assets/repository/.github/workflows/zcnblk-kmod-matrix.yml
 assets/repository/bench-results/zc-current-dualefa-block-20260823T234720Z/client-pull/current-record-12m-gated/summary.log
 assets/repository/bench-results/zc-zcnblk-c8in96w2c-tcp-arena-write-kickfix-alias-qd128-long-20260822T1900Z/summary.log
+assets/repository/infra/diskpipe-docs/main.tf
 assets/repository/kmods/matrix/cos-kernel-devenv-arm-bucket.patch
 assets/repository/kmods/matrix/machine-profiles.json
 assets/repository/kmods/matrix/targets.json
@@ -72,6 +73,7 @@ reference/docs/lane-flow-scheduler.html
 reference/docs/saml-realtime-revocation-debug.html
 reference/docs/wal-custody-tiers.html
 reference/docs/zero-copy-descriptor.html
+reference/infra/diskpipe-docs/README.html
 site.css
 standalone.html
 universe.html
