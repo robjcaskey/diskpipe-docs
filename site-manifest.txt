@@ -59,6 +59,7 @@ docs/costs/AZURE.html
 docs/costs/GCP.html
 docs/streaming-replication-shaping.html
 docs/zccusan.html
+home.html
 index.html
 kubernetes.html
 reference/LICENSE.html
